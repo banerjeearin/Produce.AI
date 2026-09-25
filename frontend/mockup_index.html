@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Produce.Ai Dashboard</title>
+    <link rel="stylesheet" href="styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar -->
+        <aside class="sidebar glass-panel">
+            <div class="logo">
+                <div class="logo-icon"><i class="ri-instance-line"></i></div>
+                <h2>Produce.Ai</h2>
+            </div>
+            
+            <nav class="nav-menu">
+                <a href="#" class="nav-item active">
+                    <i class="ri-dashboard-line"></i>
+                    <span>Dashboard</span>
+                </a>
+                <a href="#" class="nav-item">
+                    <i class="ri-git-merge-line"></i>
+                    <span>Pipeline Runs</span>
+                </a>
+                <a href="#" class="nav-item">
+                    <i class="ri-error-warning-line"></i>
+                    <span>Exception Queue</span>
+                    <span class="badge danger">3</span>
+                </a>
+                <a href="#" class="nav-item">
+                    <i class="ri-settings-4-line"></i>
+                    <span>Settings</span>
+                </a>
+            </nav>
+
+            <div class="user-profile">
+                <div class="avatar"><i class="ri-user-line"></i></div>
+                <div class="user-info">
+                    <p class="name">Prod Manager</p>
+                    <p class="role">Admin</p>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <header class="top-header">
+                <div class="header-content">
+                    <h1>Manufacturing Overview</h1>
+                    <p class="subtitle">Real-time Shopify to ERPNext Orchestration</p>
+                </div>
+                <div class="header-actions">
+                    <button class="btn btn-primary glow-effect">
+                        <i class="ri-play-line"></i> Run Pipeline
+                    </button>
+                </div>
+            </header>
+
+            <!-- Stats Overview -->
+            <section class="stats-grid">
+                <div class="stat-card glass-panel">
+                    <div class="stat-icon primary"><i class="ri-shopping-cart-2-line"></i></div>
+                    <div class="stat-details">
+                        <p class="stat-label">Orders Processed Today</p>
+                        <h3 class="stat-value">142</h3>
+                        <p class="stat-trend positive"><i class="ri-arrow-up-line"></i> +12%</p>
+                    </div>
+                </div>
+                
+                <div class="stat-card glass-panel">
+                    <div class="stat-icon success"><i class="ri-hammer-line"></i></div>
+                    <div class="stat-details">
+                        <p class="stat-label">Work Orders Created</p>
+                        <h3 class="stat-value">28</h3>
+                        <p class="stat-trend neutral"><i class="ri-subtract-line"></i> Same as yesterday</p>
+                    </div>
+                </div>
+
+                <div class="stat-card glass-panel">
+                    <div class="stat-icon danger"><i class="ri-alert-line"></i></div>
+                    <div class="stat-details">
+                        <p class="stat-label">Open Exceptions</p>
+                        <h3 class="stat-value">3</h3>
+                        <p class="stat-trend negative"><i class="ri-arrow-up-line"></i> Requires attention</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Main Dashboard Area -->
+            <div class="dashboard-content">
+                <!-- Exceptions Table -->
+                <div class="card glass-panel exception-card">
+                    <div class="card-header">
+                        <h3><i class="ri-error-warning-fill text-danger"></i> Action Required: Exceptions</h3>
+                        <button class="btn btn-text">View All</button>
+                    </div>
+                    <div class="table-container">
+                        <table class="modern-table">
+                            <thead>
+                                <tr>
+                                    <th>Error Type</th>
+                                    <th>Related SKU</th>
+                                    <th>Description</th>
+                                    <th>Status</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td><span class="tag danger">MISSING_BOM_RECIPE</span></td>
+                                    <td class="font-mono">NARAST002_M_BLUE</td>
+                                    <td>No BOM recipe found in BomRecipeMaster</td>
+                                    <td><span class="status-dot red"></span> Open</td>
+                                    <td><button class="btn btn-sm btn-outline">Resolve</button></td>
+                                </tr>
+                                <tr>
+                                    <td><span class="tag warning">MISSING_SKU</span></td>
+                                    <td class="font-mono text-muted">N/A</td>
+                                    <td>Shopify Order Line ID 4059 has no SKU</td>
+                                    <td><span class="status-dot red"></span> Open</td>
+                                    <td><button class="btn btn-sm btn-outline">Resolve</button></td>
+                                </tr>
+                                <tr>
+                                    <td><span class="tag info">ERP_ITEM_CREATION_FAILED</span></td>
+                                    <td class="font-mono">NARASH010_L_WHITE</td>
+                                    <td>Validation Error: Item Group required</td>
+                                    <td><span class="status-dot red"></span> Open</td>
+                                    <td><button class="btn btn-sm btn-outline">Resolve</button></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Pipeline Activity -->
+                <div class="card glass-panel activity-card">
+                    <div class="card-header">
+                        <h3><i class="ri-history-line text-primary"></i> Recent Pipeline Activity</h3>
+                    </div>
+                    <div class="activity-feed">
+                        <div class="activity-item">
+                            <div class="activity-icon success"><i class="ri-check-line"></i></div>
+                            <div class="activity-content">
+                                <h4>Pipeline Run #1042 Completed</h4>
+                                <p>Processed 15 orders, created 3 Work Orders in ERPNext.</p>
+                                <span class="time">10 mins ago</span>
+                            </div>
+                        </div>
+                        <div class="activity-item">
+                            <div class="activity-icon primary"><i class="ri-tools-line"></i></div>
+                            <div class="activity-content">
+                                <h4>Work Order Created</h4>
+                                <p>WO-2026-0089 generated for SKU: TSHIRT-BL-M (Qty: 50)</p>
+                                <span class="time">12 mins ago</span>
+                            </div>
+                        </div>
+                        <div class="activity-item">
+                            <div class="activity-icon warning"><i class="ri-alert-line"></i></div>
+                            <div class="activity-content">
+                                <h4>Exception Logged</h4>
+                                <p>Missing BOM recipe for NARAST002_M_BLUE</p>
+                                <span class="time">15 mins ago</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    
+    <script>
+        // Simple micro-interaction scripts
+        document.querySelectorAll('.btn').forEach(button => {
+            button.addEventListener('mousedown', () => button.style.transform = 'scale(0.95)');
+            button.addEventListener('mouseup', () => button.style.transform = 'scale(1)');
+            button.addEventListener('mouseleave', () => button.style.transform = 'scale(1)');
+        });
+    </script>
+</body>
+</html>
