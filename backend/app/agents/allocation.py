@@ -20,26 +20,39 @@ async def allocation_agent(state: AgentState) -> AgentState:
     erp_client = ERPNextClient()
     company = os.getenv("ERPNEXT_COMPANY", "Aaishka Industries Pvt. Ltd.")
     
-    # 1. Fetch current stock balance
+    # 1. Fetch current stock balance from the synced ERPNext Stock Balance report
+    # Use the ERPNext Item ID (item_code) to determine the stock quantity, not material description.
     stock_balances = {}
     try:
-        payload = {
-            "report_name": "Stock Balance",
-            "filters": {
-                "company": company,
-                "to_date": datetime.now().strftime("%Y-%m-%d")
-            },
-            "ignore_prepared_report": 1
-        }
-        resp = await erp_client.client.post("/api/method/frappe.desk.query_report.run", json=payload)
-        data = resp.json()
-        if "message" in data and "result" in data["message"]:
-            for row in data["message"]["result"]:
-                if isinstance(row, dict) and row.get("item_code"):
-                    item_code = row["item_code"]
-                    bal_qty = float(row.get("bal_qty", 0.0))
-                    # Aggregate stock across warehouses
-                    stock_balances[item_code] = stock_balances.get(item_code, 0.0) + bal_qty
+        from datetime import datetime
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        stock_report = await erp_client.get_stock_balance_report(today_str, company=company)
+        stock_dict = {}
+        for r in stock_report:
+            if isinstance(r, dict) and r.get("item_code"):
+                code = str(r.get("item_code")).strip()
+                qty = float(r.get("bal_qty", 0.0))
+                stock_dict[code] = qty
+                    
+        # Check mapping from MapShopifySkuErpItem
+        from app.models import MapShopifySkuErpItem
+        async with AsyncSessionLocal() as db_map:
+            stmt_m = select(MapShopifySkuErpItem).where(MapShopifySkuErpItem.shopify_sku.in_(classified_skus))
+            res_m = await db_map.execute(stmt_m)
+            mappings = {m.shopify_sku: m.erp_item_code for m in res_m.scalars().all()}
+            
+        for sku in classified_skus:
+            erp_item_id = mappings.get(sku)
+            if not erp_item_id:
+                # Fallback to ERPNext lookup
+                matched = await erp_client.get_item(sku)
+                if matched:
+                    erp_item_id = matched.get("name")
+            
+            erp_code_str = str(erp_item_id or sku).strip()
+            # Determine stock strictly using ERPNext Item ID
+            qty = stock_dict.get(erp_code_str, 0.0)
+            stock_balances[sku] = max(0.0, qty)
     except Exception as e:
         print(f"Error fetching stock balance for allocation: {e}")
     finally:
@@ -55,6 +68,7 @@ async def allocation_agent(state: AgentState) -> AgentState:
             select(StgShopifySalesOrderLine)
             .join(StgShopifySalesOrderLine.header)
             .options(joinedload(StgShopifySalesOrderLine.header))
+            .where(StgShopifySalesOrderHdr.run_id == state.get("run_id"))
             .where(StgShopifySalesOrderLine.processing_status == ProcessingStatus.CLASSIFIED)
             .where(StgShopifySalesOrderLine.invoicing_status == InvoicingStatus.PENDING)
             .order_by(StgShopifySalesOrderHdr.created_at.asc(), StgShopifySalesOrderLine.id.asc())
@@ -68,37 +82,47 @@ async def allocation_agent(state: AgentState) -> AgentState:
             available_stock = stock_balances.get(sku, 0.0)
 
             if available_stock >= ordered_qty:
-                # Fully fulfillable
+                # Fully fulfillable from stock
                 line.fulfilled_qty = ordered_qty
                 line.unfulfilled_qty = 0
-                line.invoicing_status = InvoicingStatus.INVOICED # Mark ready for invoicing
+                line.invoicing_status = InvoicingStatus.INVOICED # Ready for sales invoice
                 stock_balances[sku] -= ordered_qty
                 allocated_lines_count += 1
             elif available_stock > 0:
                 # Partially fulfillable
-                line.fulfilled_qty = int(available_stock)
-                line.unfulfilled_qty = ordered_qty - int(available_stock)
+                alloc = int(available_stock)
+                line.fulfilled_qty = alloc
+                line.unfulfilled_qty = ordered_qty - alloc
                 line.invoicing_status = InvoicingStatus.PARTIAL
-                stock_balances[sku] -= int(available_stock)
+                stock_balances[sku] -= alloc
                 partial_lines_count += 1
             else:
-                # Completely unfulfillable
+                # Completely unfulfillable -> requires manufacturing
                 line.fulfilled_qty = 0
                 line.unfulfilled_qty = ordered_qty
-                # Remains PENDING for invoicing, waiting for manufacturing
+                # Remains PENDING for invoicing until manufactured
                 unallocated_lines_count += 1
                 
         await db.commit()
 
         if lines:
+            alloc_summary = f"{allocated_lines_count} Fulfilled / {unallocated_lines_count + partial_lines_count} Shortage"
             log = ActivityLog(
                 run_id=state.get("run_id"),
                 agent_name="Allocation",
-                title="Stock Allocated",
-                description=f"Processed {len(lines)} lines. Fully Allocated: {allocated_lines_count}, Partially Allocated: {partial_lines_count}, Unallocated (Shortage): {unallocated_lines_count}",
+                title="Stock Allocation Check",
+                description=f"Evaluated {len(lines)} lines: {allocated_lines_count} In-Stock (Direct Invoicing), {partial_lines_count} Partial, {unallocated_lines_count} Shortage (To Manufacture).",
+                doc_reference=alloc_summary,
                 type=ActivityType.SUCCESS
             )
             db.add(log)
             await db.commit()
 
-    return state
+        has_shortage = (unallocated_lines_count > 0 or partial_lines_count > 0)
+        has_in_stock = (allocated_lines_count > 0 or partial_lines_count > 0)
+
+    return {
+        "needs_manufacturing": has_shortage,
+        "has_shortage": has_shortage,
+        "has_in_stock": has_in_stock
+    }

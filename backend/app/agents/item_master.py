@@ -69,11 +69,16 @@ async def item_master_agent(state: AgentState) -> AgentState:
         
         if successful_skus:
             from app.models import ActivityLog, ActivityType
+            stmt_m = select(MapShopifySkuErpItem).where(MapShopifySkuErpItem.shopify_sku.in_(successful_skus))
+            res_m = await db.execute(stmt_m)
+            item_codes = [m.erp_item_code for m in res_m.scalars().all()] or successful_skus
+
             log = ActivityLog(
                 run_id=state.get("run_id"),
                 agent_name="Item Master",
                 title="ERP Item Verification",
                 description=f"Verified {len(successful_skus)} mapped ERP items: {', '.join(successful_skus)}",
+                doc_reference=", ".join(item_codes),
                 type=ActivityType.SUCCESS
             )
             db.add(log)
@@ -81,4 +86,7 @@ async def item_master_agent(state: AgentState) -> AgentState:
     
     await erp_client.close()
 
-    return {"exceptions": exceptions}
+    return {
+        "classified_skus": classified_skus,
+        "exceptions": exceptions
+    }

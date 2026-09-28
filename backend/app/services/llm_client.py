@@ -46,5 +46,22 @@ class LLMClient:
             )
             return response.content[0].text.strip()
         except Exception as e:
-            logger.error(f"LLM API call failed: {e}")
-            return "LLM analysis failed due to an API error."
+            logger.error(f"Anthropic LLM API call failed: {e}")
+            # Try OpenAI as fallback if available
+            openai_key = os.getenv("OPENAI_API_KEY")
+            if openai_key:
+                try:
+                    from openai import AsyncOpenAI
+                    openai_client = AsyncOpenAI(api_key=openai_key)
+                    gpt_resp = await openai_client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt}
+                        ],
+                        max_tokens=150
+                    )
+                    return gpt_resp.choices[0].message.content.strip()
+                except Exception as oai_err:
+                    logger.error(f"OpenAI fallback also failed: {oai_err}")
+            return "Please verify that the item exists in ERPNext Item Master and that its default BOM recipe is configured."

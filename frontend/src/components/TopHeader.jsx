@@ -5,8 +5,8 @@ import 'react-datepicker/dist/react-datepicker.css';
 
 const TopHeader = () => {
     const [isLoading, setIsLoading] = useState(false);
-    const [dateFrom, setDateFrom] = useState(new Date());
-    const [dateTo, setDateTo] = useState(new Date());
+    const [dateFrom, setDateFrom] = useState(new Date(2025, 3, 1)); // 01.04.2025
+    const [dateTo, setDateTo] = useState(new Date(2025, 3, 10));  // 10.04.2025
 
     const handleRunPipeline = async () => {
         setIsLoading(true);

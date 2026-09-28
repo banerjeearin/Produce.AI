@@ -1,5 +1,5 @@
 import asyncio
-from langgraph.checkpoint.aiosqlite import AsyncSqliteSaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from app.agents.orchestrator import graph, interrupts
 
 async def main():

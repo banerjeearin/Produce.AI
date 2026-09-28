@@ -19,3 +19,7 @@ class AgentState(TypedDict):
     exceptions: List[Dict[str, Any]]
     # Work order plans generated in this run
     work_order_plans: List[Dict[str, Any]]
+    # Shortage / Manufacturing flags
+    needs_manufacturing: bool
+    has_shortage: bool
+    has_in_stock: bool

@@ -13,7 +13,7 @@ class ERPNextClient:
             "Content-Type": "application/json",
             "Accept": "application/json"
         }
-        self.client = httpx.AsyncClient(base_url=self.base_url, headers=self.headers)
+        self.client = httpx.AsyncClient(base_url=self.base_url, headers=self.headers, timeout=30.0)
 
     async def get_item(self, item_code: str) -> Optional[Dict[str, Any]]:
         # 1. Try exact match on item_code (primary key)
@@ -21,8 +21,9 @@ class ERPNextClient:
         if response.status_code == 200:
             return response.json().get("data")
             
-        # 2. If 404, fallback to searching by item_name
+        # 2. If 404, fallback to searching by item_name (exact then like)
         if response.status_code == 404:
+            # 2a. Exact item_name
             params = {
                 "filters": f'[["item_name", "=", "{item_code}"]]',
                 "fields": '["name", "item_code", "item_name"]'
@@ -31,8 +32,22 @@ class ERPNextClient:
             if search_resp.status_code == 200:
                 data = search_resp.json().get("data", [])
                 if data:
-                    # Return the first match. We only need the primary key (name/item_code) anyway
                     return data[0]
+
+            # 2b. Like matches (handling _ and -)
+            variations = [item_code, item_code.replace("_", "-"), item_code.replace("_", " "), item_code.replace("-", " ")]
+            for v in variations:
+                clean_v = v.strip()
+                if clean_v:
+                    params_like = {
+                        "filters": f'[["item_name", "like", "%{clean_v}%"]]',
+                        "fields": '["name", "item_code", "item_name"]'
+                    }
+                    resp_like = await self.client.get("/api/resource/Item", params=params_like)
+                    if resp_like.status_code == 200:
+                        data_like = resp_like.json().get("data", [])
+                        if data_like:
+                            return data_like[0]
             return None
             
         response.raise_for_status()

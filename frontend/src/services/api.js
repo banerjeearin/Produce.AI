@@ -69,3 +69,25 @@ export const resumeRun = async (runId) => {
     if (!res.ok) throw new Error(`Failed to resume run ${runId}`);
     return res.json();
 };
+
+export const getErpItems = async () => {
+    const res = await fetch(`${BASE_URL}/pipeline/erp-items`);
+    if (!res.ok) throw new Error('Failed to fetch ERPNext items');
+    return res.json();
+};
+
+export const updateSkuMapping = async (shopifySku, erpItemCode, runId) => {
+    const res = await fetch(`${BASE_URL}/pipeline/mapping/update`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            shopify_sku: shopifySku,
+            erp_item_code: erpItemCode,
+            run_id: runId || null
+        })
+    });
+    if (!res.ok) throw new Error('Failed to update SKU mapping');
+    return res.json();
+};

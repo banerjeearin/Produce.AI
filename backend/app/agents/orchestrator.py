@@ -26,12 +26,37 @@ graph.add_node("planning", planning_agent)
 graph.add_node("work_order", work_order_agent)
 graph.add_node("exception", exception_agent)
 
-# Define edges (linear sequence)
+# Conditional routing after Allocation
+def route_after_allocation(state: AgentState) -> str:
+    has_in_stock = state.get("has_in_stock", False)
+    has_shortage = state.get("has_shortage", False) or state.get("needs_manufacturing", False)
+    
+    if has_in_stock:
+        return "invoicing"
+    elif has_shortage:
+        return "bom_generation"
+    else:
+        return "exception"
+
+# Conditional routing after Invoicing
+def check_manufacturing_needed(state: AgentState) -> str:
+    if state.get("needs_manufacturing", False) or state.get("has_shortage", False):
+        return "bom_generation"
+    return "exception"
+
+# Define edges
 graph.add_edge("ingestion", "classification")
 graph.add_edge("classification", "item_master")
 graph.add_edge("item_master", "allocation")
-graph.add_edge("allocation", "invoicing")
-graph.add_edge("invoicing", "bom_generation")
+graph.add_conditional_edges("allocation", route_after_allocation, {
+    "invoicing": "invoicing",
+    "bom_generation": "bom_generation",
+    "exception": "exception"
+})
+graph.add_conditional_edges("invoicing", check_manufacturing_needed, {
+    "bom_generation": "bom_generation",
+    "exception": "exception"
+})
 graph.add_edge("bom_generation", "planning")
 graph.add_edge("planning", "work_order")
 graph.add_edge("work_order", "exception")
@@ -45,7 +70,7 @@ interrupts = [
     "invoicing", "bom_generation", "planning", "work_order"
 ]
 
-from langgraph.checkpoint.aiosqlite import AsyncSqliteSaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from datetime import datetime
 
 async def run_pipeline(run_id: str, raw_orders: list = None, date_from=None, date_to=None):
@@ -90,4 +115,6 @@ async def get_pipeline_state(run_id: str):
     async with AsyncSqliteSaver.from_conn_string("checkpoints.sqlite") as memory:
         orchestrator = graph.compile(checkpointer=memory, interrupt_after=interrupts)
         return await orchestrator.aget_state(config)
+
+
 

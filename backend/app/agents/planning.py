@@ -87,11 +87,13 @@ async def planning_agent(state: AgentState) -> AgentState:
         
         if generated_plans:
             from app.models import ActivityLog, ActivityType
+            plan_summaries = [f"{p['erp_fg_item_code']} ({p['net_qty']} Nos)" for p in generated_plans]
             log = ActivityLog(
                 run_id=state.get("run_id"),
                 agent_name="Planning",
                 title="Production Planning",
                 description=f"Generated {len(generated_plans)} production plans for {planning_date}.",
+                doc_reference=", ".join(plan_summaries),
                 type=ActivityType.SUCCESS
             )
             db.add(log)

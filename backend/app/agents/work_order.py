@@ -74,6 +74,7 @@ async def work_order_agent(state: AgentState) -> AgentState:
                 agent_name="Work Order",
                 title="Work Orders Generated",
                 description=f"Created {len(created_orders)} work orders in ERPNext: {', '.join(created_orders)}",
+                doc_reference=", ".join(created_orders),
                 type=ActivityType.SUCCESS
             )
             db.add(log)

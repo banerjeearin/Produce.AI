@@ -54,7 +54,24 @@ const ActivityFeed = () => {
                                 <i className={getIconClass(act.type).split(' ')[1]}></i>
                             </div>
                             <div className="activity-content">
-                                <h4>{act.title}</h4>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                                    <h4>{act.title}</h4>
+                                    {act.doc_reference && (
+                                        <span style={{ 
+                                            fontFamily: 'monospace', 
+                                            color: '#38bdf8', 
+                                            background: 'rgba(56, 189, 248, 0.1)', 
+                                            border: '1px solid rgba(56, 189, 248, 0.3)', 
+                                            padding: '0.15rem 0.4rem', 
+                                            borderRadius: '4px',
+                                            fontSize: '0.75rem',
+                                            fontWeight: '600',
+                                            marginLeft: '0.5rem'
+                                        }}>
+                                            {act.doc_reference}
+                                        </span>
+                                    )}
+                                </div>
                                 <p>{act.description}</p>
                                 <span className="time">{timeAgo(act.created_at)}</span>
                             </div>

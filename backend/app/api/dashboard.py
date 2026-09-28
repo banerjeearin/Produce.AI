@@ -26,7 +26,15 @@ async def get_activities(limit: int = 15):
         try:
             result = await db.execute(select(ActivityLog).order_by(ActivityLog.created_at.desc()).limit(limit))
             activities = result.scalars().all()
-            return [{"title": a.title, "description": a.description, "type": a.type, "created_at": a.created_at, "run_id": a.run_id, "agent_name": a.agent_name} for a in activities]
+            return [{
+                "title": a.title, 
+                "description": a.description, 
+                "doc_reference": a.doc_reference,
+                "type": a.type, 
+                "created_at": a.created_at, 
+                "run_id": a.run_id, 
+                "agent_name": a.agent_name
+            } for a in activities]
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -60,7 +68,7 @@ async def resolve_exception(exception_id: int):
             # Remove from LangGraph state memory
             if ex.run_id and ex.related_sku:
                 from app.agents.orchestrator import graph, interrupts
-                from langgraph.checkpoint.aiosqlite import AsyncSqliteSaver
+                from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
                 config = {"configurable": {"thread_id": ex.run_id}}
                 async with AsyncSqliteSaver.from_conn_string("checkpoints.sqlite") as memory:
                     orchestrator = graph.compile(checkpointer=memory, interrupt_after=interrupts)

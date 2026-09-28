@@ -12,8 +12,14 @@ async def classification_agent(state: AgentState) -> AgentState:
     exceptions = state.get("exceptions", [])
     
     async with AsyncSessionLocal() as db:
-        # Fetch all PENDING lines
-        stmt = select(StgShopifySalesOrderLine).where(StgShopifySalesOrderLine.processing_status == ProcessingStatus.PENDING)
+        # Fetch PENDING lines for this run
+        from app.models import StgShopifySalesOrderHdr
+        stmt = (
+            select(StgShopifySalesOrderLine)
+            .join(StgShopifySalesOrderLine.header)
+            .where(StgShopifySalesOrderHdr.run_id == state.get("run_id"))
+            .where(StgShopifySalesOrderLine.processing_status == ProcessingStatus.PENDING)
+        )
         result = await db.execute(stmt)
         pending_lines = result.scalars().all()
         
@@ -42,6 +48,7 @@ async def classification_agent(state: AgentState) -> AgentState:
                 agent_name="Classification",
                 title="Orders Classified",
                 description=f"Classified {len(pending_lines)} order lines. Unique SKUs: {', '.join(list(classified_skus))}",
+                doc_reference=", ".join(list(classified_skus)),
                 type=ActivityType.SUCCESS
             )
             db.add(log)

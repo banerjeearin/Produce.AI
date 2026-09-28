@@ -36,8 +36,10 @@ async def bom_generation_agent(state: AgentState) -> AgentState:
                 if bom:
                     continue
                     
-                # Look up recipe locally
-                stmt = select(BomRecipeMaster).where(BomRecipeMaster.fg_item_code == sku)
+                # Look up recipe locally by SKU or ERP Item Code
+                stmt = select(BomRecipeMaster).where(
+                    (BomRecipeMaster.fg_item_code == sku) | (BomRecipeMaster.fg_item_code == erp_code)
+                )
                 result = await db.execute(stmt)
                 recipe_lines = result.scalars().all()
                 
@@ -140,16 +142,30 @@ async def bom_generation_agent(state: AgentState) -> AgentState:
                         "uom": line.uom
                     })
                 
-                if missing_rm:
-                    continue
-                    
-                # Create BOM
+                # Retrieve order date from StgShopifySalesOrderHdr for this SKU if available
+                from app.models import StgShopifySalesOrderHdr, StgShopifySalesOrderLine
+                stmt_order = (
+                    select(StgShopifySalesOrderHdr)
+                    .join(StgShopifySalesOrderLine)
+                    .where(StgShopifySalesOrderHdr.run_id == state.get("run_id"))
+                    .where(StgShopifySalesOrderLine.sku == sku)
+                    .order_by(StgShopifySalesOrderHdr.created_at.asc())
+                )
+                res_order = await db.execute(stmt_order)
+                order_hdr = res_order.scalars().first()
+                order_date_str = order_hdr.created_at.strftime("%Y-%m-%d") if (order_hdr and order_hdr.created_at) else None
+
+                # Create BOM in ERPNext
                 payload = {
                     "item": erp_code,
+                    "quantity": 1.0,
                     "is_active": 1,
                     "is_default": 1,
                     "items": items_payload
                 }
+                if order_date_str:
+                    payload["description"] = f"Created for Shopify Order Date: {order_date_str}"
+                
                 await erp_client.create_bom(payload)
                 
             except Exception as e:
@@ -159,6 +175,7 @@ async def bom_generation_agent(state: AgentState) -> AgentState:
                 if isinstance(e, httpx.HTTPStatusError):
                     err_msg = e.response.text if hasattr(e, 'response') else str(e)
                 ex = ExceptionQueue(
+                    run_id=state.get("run_id"),
                     error_type="ERP_BOM_CREATION_FAILED",
                     related_sku=sku,
                     description=f"Failed to create BOM in ERPNext: {err_msg}",
@@ -170,12 +187,25 @@ async def bom_generation_agent(state: AgentState) -> AgentState:
         await db.commit()
         
         if classified_skus:
-            from app.models import ActivityLog, ActivityType
+            from app.models import ActivityLog, ActivityType, MapShopifySkuErpItem
+            stmt_m = select(MapShopifySkuErpItem).where(MapShopifySkuErpItem.shopify_sku.in_(classified_skus))
+            res_m = await db.execute(stmt_m)
+            erp_codes = [m.erp_item_code for m in res_m.scalars().all()] or classified_skus
+            
+            bom_names = []
+            for code in erp_codes:
+                bom_doc = await erp_client.get_bom(code)
+                if bom_doc:
+                    bom_names.append(bom_doc.get("name"))
+            
+            doc_ref = ", ".join(bom_names) if bom_names else ", ".join(erp_codes)
+
             log = ActivityLog(
                 run_id=state.get("run_id"),
                 agent_name="BOM Generation",
                 title="BOM Verified",
                 description=f"Verified BOMs for {len(classified_skus)} ERP items: {', '.join(list(classified_skus))}",
+                doc_reference=doc_ref,
                 type=ActivityType.SUCCESS
             )
             db.add(log)
