@@ -1,4 +1,4 @@
-from fastapi import APIRouter, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
@@ -664,6 +664,9 @@ async def create_invoice_endpoint(req: CreateInvoiceRequest):
     company = os.getenv("ERPNEXT_COMPANY", "Aaishka Industries Pvt. Ltd.")
     erp_client = ERPNextClient()
 
+    clean_order_id = req.order_id.strip() if req.order_id else None
+    bare_order_id = clean_order_id.lstrip("#") if clean_order_id else None
+
     try:
         async with AsyncSessionLocal() as db:
             # 1. Fetch header
@@ -672,16 +675,24 @@ async def create_invoice_endpoint(req: CreateInvoiceRequest):
                 .options(joinedload(StgShopifySalesOrderHdr.lines))
                 .where(StgShopifySalesOrderHdr.run_id == req.run_id)
             )
-            if req.order_id:
+            if clean_order_id:
                 stmt = stmt.where(
-                    (StgShopifySalesOrderHdr.shopify_order_id == req.order_id) | 
-                    (StgShopifySalesOrderHdr.order_number == req.order_id)
+                    (StgShopifySalesOrderHdr.shopify_order_id.in_([clean_order_id, bare_order_id])) | 
+                    (StgShopifySalesOrderHdr.order_number.in_([clean_order_id, bare_order_id]))
                 )
             
             res = await db.execute(stmt)
             headers = res.unique().scalars().all()
             if not headers:
-                raise HTTPException(status_code=404, detail="Order not found for this pipeline run.")
+                # Fallback: if order_id filter failed, match by run_id alone
+                res_all = await db.execute(
+                    select(StgShopifySalesOrderHdr)
+                    .options(joinedload(StgShopifySalesOrderHdr.lines))
+                    .where(StgShopifySalesOrderHdr.run_id == req.run_id)
+                )
+                headers = res_all.unique().scalars().all()
+                if not headers:
+                    raise HTTPException(status_code=404, detail="Order not found for this pipeline run.")
 
             created_invoices = []
 
