@@ -7,6 +7,7 @@ import ActivityFeed from './components/ActivityFeed';
 import PipelineRuns from './components/PipelineRuns';
 import Settings from './components/Settings';
 import InventoryReport from './components/InventoryReport';
+import MaterialMaster from './components/MaterialMaster';
 
 function App() {
   const [currentView, setCurrentView] = useState('Dashboard');
@@ -66,6 +67,10 @@ function App() {
     
     if (currentView === 'Inventory Report') {
       return <InventoryReport />;
+    }
+    
+    if (currentView === 'Material Master') {
+      return <MaterialMaster />;
     }
     
     return (

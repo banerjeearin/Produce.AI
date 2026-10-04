@@ -4,7 +4,7 @@ load_dotenv()
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api import dashboard, pipeline
+from app.api import dashboard, pipeline, material_master
 
 app = FastAPI(title="Produce.Ai Backend")
 
@@ -19,3 +19,4 @@ app.add_middleware(
 
 app.include_router(dashboard.router, prefix="/api/dashboard", tags=["dashboard"])
 app.include_router(pipeline.router, prefix="/api/pipeline", tags=["pipeline"])
+app.include_router(material_master.router, prefix="/api/material-master", tags=["material_master"])

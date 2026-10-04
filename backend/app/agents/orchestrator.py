@@ -44,10 +44,9 @@ def check_manufacturing_needed(state: AgentState) -> str:
         return "bom_generation"
     return "exception"
 
-# Define edges
+# Define edges (classification routes directly to allocation; Material Master creation is completely isolated outside the pipeline)
 graph.add_edge("ingestion", "classification")
-graph.add_edge("classification", "item_master")
-graph.add_edge("item_master", "allocation")
+graph.add_edge("classification", "allocation")
 graph.add_conditional_edges("allocation", route_after_allocation, {
     "invoicing": "invoicing",
     "bom_generation": "bom_generation",
@@ -66,7 +65,7 @@ graph.add_edge("exception", END)
 graph.set_entry_point("ingestion")
 
 interrupts = [
-    "ingestion", "classification", "item_master", "allocation", 
+    "ingestion", "classification", "allocation", 
     "invoicing", "bom_generation", "planning", "work_order"
 ]
 

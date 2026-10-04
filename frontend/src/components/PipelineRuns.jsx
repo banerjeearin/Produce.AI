@@ -620,12 +620,11 @@ const PipelineRuns = ({ dateFrom, dateTo }) => {
                                                     {[
                                                         { id: 'ingestion', label: '1. Ingested' },
                                                         { id: 'classification', label: '2. Classified' },
-                                                        { id: 'item_master', label: '3. Item Master' },
-                                                        { id: 'allocation', label: '4. Stock Allocation' },
-                                                        { id: 'invoicing', label: '5. Sales Invoice' },
-                                                        { id: 'bom_generation', label: '6. BOM Recipe' },
-                                                        { id: 'planning', label: '7. Work Planning' },
-                                                        { id: 'work_order', label: '8. Work Orders' }
+                                                        { id: 'allocation', label: '3. Stock Allocation' },
+                                                        { id: 'invoicing', label: '4. Sales Invoice' },
+                                                        { id: 'bom_generation', label: '5. BOM Recipe' },
+                                                        { id: 'planning', label: '6. Work Planning' },
+                                                        { id: 'work_order', label: '7. Work Orders' }
                                                     ].map((step, sIdx) => {
                                                         const isCurrent = runState.next_nodes.includes(step.id);
                                                         return (

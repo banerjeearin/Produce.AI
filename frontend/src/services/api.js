@@ -130,3 +130,63 @@ export const fetchBomSummary = async (dateFrom, dateTo) => {
     if (!res.ok) throw new Error('Failed to fetch BOM summary');
     return res.json();
 };
+
+export const getMaterialMasterStatus = async (identifier) => {
+    const res = await fetch(`${BASE_URL}/material-master/status/${encodeURIComponent(identifier)}`);
+    if (!res.ok) throw new Error('Failed to fetch item status');
+    return res.json();
+};
+
+export const previewMaterialMasters = async (items) => {
+    const res = await fetch(`${BASE_URL}/material-master/preview`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ skus_or_items: items })
+    });
+    if (!res.ok) throw new Error('Failed to preview items');
+    return res.json();
+};
+
+export const createMaterialMaster = async (payload) => {
+    const res = await fetch(`${BASE_URL}/material-master/create`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Failed to create material master');
+    }
+    return res.json();
+};
+
+export const syncMaterialMasterDryRun = async (onlyProduct = null) => {
+    const query = onlyProduct ? `?only=${encodeURIComponent(onlyProduct)}` : '';
+    const res = await fetch(`${BASE_URL}/material-master/sync/dry-run${query}`, {
+        method: 'POST'
+    });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Dry run failed');
+    }
+    return res.json();
+};
+
+export const syncMaterialMasterApply = async (onlyProduct = null, backfill = false) => {
+    const params = new URLSearchParams();
+    if (onlyProduct) params.append('only', onlyProduct);
+    if (backfill) params.append('backfill', 'true');
+    const query = params.toString() ? `?${params.toString()}` : '';
+    const res = await fetch(`${BASE_URL}/material-master/sync/apply${query}`, {
+        method: 'POST'
+    });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Sync execution failed');
+    }
+    return res.json();
+};
+
+export const getItemGroups = async () => {
+    return { item_groups: ["Products", "Raw Material", "Sub Assemblies", "Consumables"] };
+};

@@ -22,6 +22,7 @@ const Sidebar = ({ currentView, setCurrentView }) => {
     const navItems = [
         { name: 'Dashboard', icon: 'ri-dashboard-line' },
         { name: 'Pipeline Runs', icon: 'ri-git-merge-line' },
+        { name: 'Material Master', icon: 'ri-database-2-line' },
         { name: 'Exception Queue', icon: 'ri-error-warning-line', badge: openExceptions },
         { name: 'Inventory Report', icon: 'ri-stock-line' },
         { name: 'Settings', icon: 'ri-settings-4-line' }
