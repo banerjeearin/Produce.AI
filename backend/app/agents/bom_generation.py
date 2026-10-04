@@ -155,16 +155,36 @@ async def bom_generation_agent(state: AgentState) -> AgentState:
                 order_hdr = res_order.scalars().first()
                 order_date_str = order_hdr.created_at.strftime("%Y-%m-%d") if (order_hdr and order_hdr.created_at) else None
 
+                # Retrieve total ordered qty from StgShopifySalesOrderLine for this SKU in current run
+                stmt_qty = (
+                    select(StgShopifySalesOrderLine.quantity)
+                    .join(StgShopifySalesOrderHdr)
+                    .where(StgShopifySalesOrderHdr.run_id == state.get("run_id"))
+                    .where(StgShopifySalesOrderLine.sku == sku)
+                )
+                res_qtys = await db.execute(stmt_qty)
+                ordered_qtys = res_qtys.scalars().all()
+                total_demand_qty = float(sum(ordered_qtys)) if ordered_qtys else 1.0
+
+                # Scale raw materials payload according to demand quantity
+                scaled_items_payload = []
+                for itm in items_payload:
+                    scaled_items_payload.append({
+                        "item_code": itm["item_code"],
+                        "qty": round(itm["qty"] * total_demand_qty, 3),
+                        "uom": itm["uom"]
+                    })
+
                 # Create BOM in ERPNext
                 payload = {
                     "item": erp_code,
-                    "quantity": 1.0,
+                    "quantity": total_demand_qty,
                     "is_active": 1,
                     "is_default": 1,
-                    "items": items_payload
+                    "items": scaled_items_payload
                 }
                 if order_date_str:
-                    payload["description"] = f"Created for Shopify Order Date: {order_date_str}"
+                    payload["description"] = f"Created for Shopify Order Date: {order_date_str} (Demand: {total_demand_qty})"
                 
                 await erp_client.create_bom(payload)
                 

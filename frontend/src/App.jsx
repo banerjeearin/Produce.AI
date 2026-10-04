@@ -8,6 +8,8 @@ import PipelineRuns from './components/PipelineRuns';
 import Settings from './components/Settings';
 import InventoryReport from './components/InventoryReport';
 import MaterialMaster from './components/MaterialMaster';
+import RecipeMaster from './components/RecipeMaster';
+import BomMaster from './components/BomMaster';
 
 function App() {
   const [currentView, setCurrentView] = useState('Dashboard');
@@ -71,6 +73,14 @@ function App() {
     
     if (currentView === 'Material Master') {
       return <MaterialMaster />;
+    }
+
+    if (currentView === 'Recipe Master') {
+      return <RecipeMaster />;
+    }
+
+    if (currentView === 'BOM Master') {
+      return <BomMaster />;
     }
     
     return (

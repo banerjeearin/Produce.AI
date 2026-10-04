@@ -130,7 +130,7 @@ async def invoicing_agent(state: AgentState) -> AgentState:
                     "qty": line.fulfilled_qty,
                     "price_list_rate": base_price_list_rate,
                     "rate": base_rate,
-                    "warehouse": "Stores - AIPL"
+                    "warehouse": "Finished Goods - AIPL"
                 }
                 if base_discount_amount > 0:
                     item_dict["discount_amount"] = base_discount_amount

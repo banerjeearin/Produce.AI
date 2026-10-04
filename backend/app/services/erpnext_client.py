@@ -112,7 +112,18 @@ class ERPNextClient:
         return response.json().get("data", [])
 
     async def get_bom(self, item_code: str) -> Optional[Dict[str, Any]]:
-        # Find default active BOM for item
+        # 1. First check if Item master directly specifies default_bom
+        try:
+            item_resp = await self.client.get(f"/api/resource/Item/{item_code}")
+            if item_resp.status_code == 200:
+                item_data = item_resp.json().get("data", {})
+                default_bom = item_data.get("default_bom")
+                if default_bom:
+                    return {"name": default_bom}
+        except Exception:
+            pass
+
+        # 2. Check active default BOM for item in BOM doctype
         params = {
             "filters": f'[["item", "=", "{item_code}"], ["is_active", "=", 1], ["is_default", "=", 1]]',
             "fields": '["name"]'
@@ -120,7 +131,21 @@ class ERPNextClient:
         response = await self.client.get("/api/resource/BOM", params=params)
         response.raise_for_status()
         data = response.json().get("data", [])
-        return data[0] if data else None
+        if data:
+            return data[0]
+
+        # 3. Fallback to any active BOM for this item
+        params_any = {
+            "filters": f'[["item", "=", "{item_code}"], ["is_active", "=", 1]]',
+            "fields": '["name"]'
+        }
+        res_any = await self.client.get("/api/resource/BOM", params=params_any)
+        if res_any.status_code == 200:
+            data_any = res_any.json().get("data", [])
+            if data_any:
+                return data_any[0]
+
+        return None
 
     async def create_bom(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         response = await self.client.post("/api/resource/BOM", json=payload)
@@ -128,7 +153,18 @@ class ERPNextClient:
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
             raise Exception(f"Failed to create BOM. Status: {e.response.status_code}. Response: {e.response.text}") from e
-        return response.json().get("data")
+        bom_data = response.json().get("data")
+        
+        # Ensure default_bom is linked on the ERPNext Item master
+        bom_name = bom_data.get("name") if bom_data else None
+        item_code = payload.get("item")
+        if bom_name and item_code and payload.get("is_default"):
+            try:
+                await self.client.put(f"/api/resource/Item/{item_code}", json={"default_bom": bom_name})
+            except Exception as item_err:
+                # Log or ignore if non-critical
+                pass
+        return bom_data
         
     async def get_available_stock(self, item_code: str) -> float:
         params = {

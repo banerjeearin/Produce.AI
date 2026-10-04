@@ -2,7 +2,6 @@ from langgraph.graph import StateGraph, END
 from app.agents.state import AgentState
 from app.agents.ingestion import ingestion_agent
 from app.agents.classification import classification_agent
-from app.agents.item_master import item_master_agent
 from app.agents.allocation import allocation_agent
 from app.agents.invoicing import invoicing_agent
 from app.agents.bom_generation import bom_generation_agent
@@ -15,10 +14,9 @@ from datetime import datetime
 # Initialize the state graph
 graph = StateGraph(AgentState)
 
-# Add all agent nodes
+# Add all agent nodes (Material Master creation is completely decoupled from the pipeline)
 graph.add_node("ingestion", ingestion_agent)
 graph.add_node("classification", classification_agent)
-graph.add_node("item_master", item_master_agent)
 graph.add_node("allocation", allocation_agent)
 graph.add_node("invoicing", invoicing_agent)
 graph.add_node("bom_generation", bom_generation_agent)

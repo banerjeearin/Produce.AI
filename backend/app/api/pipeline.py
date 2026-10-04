@@ -177,25 +177,30 @@ async def get_run_state(run_id: str):
                     if s not in erp_item_map:
                         erp_item_map[s] = s
 
-        # Fetch live stock report from ERPNext (strictly using ERPNext Item ID)
-        from app.services.erpnext_client import ERPNextClient
-        erp_client = ERPNextClient()
-        try:
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            stock_report = await erp_client.get_stock_balance_report(today_str)
-            stock_dict = {}
-            for r in stock_report:
-                if isinstance(r, dict) and r.get("item_code"):
-                    code = str(r.get("item_code")).strip()
-                    qty = float(r.get("bal_qty", 0.0))
-                    stock_dict[code] = stock_dict.get(code, 0.0) + qty
-            
-            for s in skus_to_check:
-                erp_code = erp_item_map.get(s, s)
-                stock_qty = stock_dict.get(str(erp_code).strip(), 0.0)
-                stock_info[s] = max(0.0, stock_qty)
-        finally:
-            await erp_client.close()
+        # Fetch live stock report from ERPNext with 60s memory cache to prevent duplicate Frappe calls
+        global _STOCK_REPORT_CACHE
+        now_ts = datetime.now().timestamp()
+        if "_STOCK_REPORT_CACHE" not in globals() or (now_ts - _STOCK_REPORT_CACHE.get("ts", 0) > 60):
+            from app.services.erpnext_client import ERPNextClient
+            erp_client = ERPNextClient()
+            try:
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                stock_report = await erp_client.get_stock_balance_report(today_str)
+                stock_dict = {}
+                for r in stock_report:
+                    if isinstance(r, dict) and r.get("item_code"):
+                        code = str(r.get("item_code")).strip()
+                        qty = float(r.get("bal_qty", 0.0))
+                        stock_dict[code] = stock_dict.get(code, 0.0) + qty
+                _STOCK_REPORT_CACHE = {"ts": now_ts, "data": stock_dict}
+            finally:
+                await erp_client.close()
+        
+        cached_stock_dict = _STOCK_REPORT_CACHE.get("data", {})
+        for s in skus_to_check:
+            erp_code = erp_item_map.get(s, s)
+            stock_qty = cached_stock_dict.get(str(erp_code).strip(), 0.0)
+            stock_info[s] = max(0.0, stock_qty)
     except Exception as e:
         print(f"Error enriching state with live stock: {e}")
         for s in skus_to_check:
@@ -274,20 +279,28 @@ async def get_bom_summary(date_from: Optional[str] = None, date_to: Optional[str
 
     erp_client = ERPNextClient()
     try:
-        # 1. Fetch ERPNext items map
-        resp_items = await erp_client.client.get('/api/resource/Item?fields=["name","item_code","item_name","stock_uom"]&limit_page_length=500')
+        # 1. Fetch ERPNext items map including default_bom directly from Item Master
+        resp_items = await erp_client.client.get('/api/resource/Item?fields=["name","item_code","item_name","stock_uom","default_bom"]&limit_page_length=500')
         erp_items = {}
+        item_master_boms = {}
         if resp_items.status_code == 200:
             for it in resp_items.json().get("data", []):
                 erp_items[it["name"]] = it.get("item_name")
+                if it.get("default_bom"):
+                    item_master_boms[it["name"]] = it["default_bom"]
 
-        # 2. Fetch active ERPNext BOMs map
+        # 2. Fetch active ERPNext BOMs map (from BOM doctype)
         resp_boms = await erp_client.client.get('/api/resource/BOM?fields=["name","item","is_active","is_default"]&limit_page_length=500')
         existing_boms = {}
         if resp_boms.status_code == 200:
             for b in resp_boms.json().get("data", []):
                 if b.get("is_active"):
                     existing_boms[b.get("item")] = b.get("name")
+        
+        # Merge BOMs: prioritize active default BOM, fallback to Item Master default_bom
+        for item_key, d_bom in item_master_boms.items():
+            if item_key not in existing_boms:
+                existing_boms[item_key] = d_bom
     finally:
         await erp_client.close()
 
@@ -299,6 +312,11 @@ async def get_bom_summary(date_from: Optional[str] = None, date_to: Optional[str
         res_recipes = await db.execute(select(BomRecipeMaster))
         recipes = res_recipes.scalars().all()
         recipe_fgs = set(r.fg_item_code for r in recipes)
+        import re
+        norm_recipe_fgs = set(
+            tuple(t.lower() for t in re.split(r'[\s_\-]+', re.sub(r'[\'\"’]', '', r.fg_item_code)) if t)
+            for r in recipes
+        )
 
     # 4. Helper to resolve ERP item with fuzzy/size matcher if not in mappings
     erp_matcher_client = ERPNextClient()
@@ -338,7 +356,12 @@ async def get_bom_summary(date_from: Optional[str] = None, date_to: Optional[str
                 erp_code_display = mapped_erp_code or None
                 item_name = (erp_items.get(mapped_erp_code) if mapped_erp_code else None) or title
                 bom_id = existing_boms.get(mapped_erp_code) if mapped_erp_code else None
+                
+                # Check recipe presence (direct or normalized tokens)
                 has_recipe = (mapped_erp_code in recipe_fgs) or (sku in recipe_fgs)
+                if not has_recipe and sku:
+                    norm_sku_tokens = tuple(t.lower() for t in re.split(r'[\s_\-]+', re.sub(r'[\'\"’]', '', sku)) if t)
+                    has_recipe = norm_sku_tokens in norm_recipe_fgs
 
                 # Grouping key: preferably mapped ERP code, otherwise raw SKU
                 group_key = mapped_erp_code or sku
@@ -368,6 +391,134 @@ async def get_bom_summary(date_from: Optional[str] = None, date_to: Optional[str
         "total_items": len(summary_list),
         "active_boms": active_count,
         "missing_boms": missing_count
+    }
+
+class BomItemToCreate(BaseModel):
+    erp_item_code: str
+    shopify_sku: Optional[str] = None
+    quantity: Optional[float] = 1.0
+
+class CreateBomsRequest(BaseModel):
+    items: List[BomItemToCreate]
+
+@router.post("/boms/create-selected")
+async def create_selected_boms(req: CreateBomsRequest):
+    """
+    Creates default BOMs in ERPNext for the selected finished goods using BomRecipeMaster recipes.
+    """
+    from app.services.erpnext_client import ERPNextClient
+    from app.db.session import AsyncSessionLocal
+    from app.models import BomRecipeMaster
+    from sqlalchemy.future import select
+    import re
+
+    if not req.items:
+        return {"created": [], "skipped": [], "failed": [], "message": "No items provided."}
+
+    created = []
+    skipped = []
+    failed = []
+
+    erp_client = ERPNextClient()
+    try:
+        async with AsyncSessionLocal() as db:
+            # Preload all recipe lines into memory for fast matching
+            res_all = await db.execute(select(BomRecipeMaster))
+            all_recipes = res_all.scalars().all()
+
+            for item in req.items:
+                erp_code = (item.erp_item_code or "").strip()
+                sku = (item.shopify_sku or "").strip()
+
+                if not erp_code:
+                    failed.append({"item": sku or "Unknown", "reason": "Missing ERP Material Code."})
+                    continue
+
+                # 1. Check if BOM already exists in ERPNext
+                try:
+                    existing = await erp_client.get_bom(erp_code)
+                    if existing:
+                        skipped.append({"item": erp_code, "reason": f"BOM already exists: {existing.get('name')}"})
+                        continue
+                except Exception as e:
+                    # Proceed to creation attempt if check fails
+                    pass
+
+                # 2. Find recipe lines for this item
+                matching_lines = [
+                    r for r in all_recipes 
+                    if (r.fg_item_code == erp_code) or (sku and r.fg_item_code == sku)
+                ]
+
+                # Fallback: normalized token matching (e.g. ignoring smart quotes / hyphens / underscores)
+                if not matching_lines and sku:
+                    norm_sku = re.sub(r'[\'\"’]', '', sku).strip()
+                    norm_tokens = [t.lower() for t in re.split(r'[\s_\-]+', norm_sku) if t]
+                    matching_lines = [
+                        r for r in all_recipes
+                        if [t.lower() for t in re.split(r'[\s_\-]+', re.sub(r'[\'\"’]', '', r.fg_item_code)) if t] == norm_tokens
+                    ]
+
+                if not matching_lines:
+                    failed.append({
+                        "item": erp_code,
+                        "sku": sku,
+                        "reason": f"No recipe found in Recipe Master for SKU '{sku}' or Code '{erp_code}'."
+                    })
+                    continue
+
+                # Output quantity based on total demand quantity
+                output_qty = float(item.quantity) if (item.quantity and item.quantity > 0) else 1.0
+
+                # 3. Construct ERPNext BOM items payload
+                items_payload = []
+                missing_rm = False
+                for r in matching_lines:
+                    # In ERPNext, raw material qty in BOM is the total required to produce the specified BOM output quantity (Quantity):
+                    # required_qty = per_piece_rate * output_qty
+                    total_rm_qty = round(r.qty * output_qty, 3)
+                    items_payload.append({
+                        "item_code": r.raw_material_code,
+                        "qty": total_rm_qty,
+                        "uom": r.uom or "Meter"
+                    })
+
+                if not items_payload:
+                    failed.append({"item": erp_code, "reason": "Recipe has 0 raw material lines."})
+                    continue
+
+                payload = {
+                    "item": erp_code,
+                    "quantity": output_qty,
+                    "is_active": 1,
+                    "is_default": 1,
+                    "items": items_payload,
+                    "description": f"Auto-created from Recipe Master for {sku or erp_code} (Demand Qty: {output_qty})"
+                }
+
+                try:
+                    new_bom = await erp_client.create_bom(payload)
+                    bom_name = new_bom.get("name") if new_bom else "Created"
+                    created.append({
+                        "item": erp_code,
+                        "bom_id": bom_name,
+                        "sku": sku,
+                        "raw_materials_count": len(items_payload)
+                    })
+                except Exception as err:
+                    failed.append({
+                        "item": erp_code,
+                        "sku": sku,
+                        "reason": f"ERPNext error: {str(err)}"
+                    })
+    finally:
+        await erp_client.close()
+
+    return {
+        "created": created,
+        "skipped": skipped,
+        "failed": failed,
+        "message": f"Successfully created {len(created)} BOMs in ERPNext. ({len(skipped)} already existed, {len(failed)} failed)"
     }
 
 @router.post("/mapping/update")
@@ -490,3 +641,260 @@ async def delete_run_data(run_id: str):
         except Exception as e:
             await db.rollback()
             return {"error": str(e)}
+
+class CreateInvoiceRequest(BaseModel):
+    run_id: str
+    order_id: Optional[str] = None
+
+@router.post("/create-invoice")
+async def create_invoice_endpoint(req: CreateInvoiceRequest):
+    """
+    Facility to create an ERPNext Sales Invoice for an order in a run once stock is created / available.
+    """
+    from app.db.session import AsyncSessionLocal
+    from app.models import (
+        StgShopifySalesOrderHdr, StgShopifySalesOrderLine, StgSalesInvoice, 
+        InvoicingStatus, ActivityLog, ActivityType, MapShopifySkuErpItem
+    )
+    from app.services.erpnext_client import ERPNextClient
+    from sqlalchemy.future import select
+    from sqlalchemy.orm import joinedload
+    import os
+
+    company = os.getenv("ERPNEXT_COMPANY", "Aaishka Industries Pvt. Ltd.")
+    erp_client = ERPNextClient()
+
+    try:
+        async with AsyncSessionLocal() as db:
+            # 1. Fetch header
+            stmt = (
+                select(StgShopifySalesOrderHdr)
+                .options(joinedload(StgShopifySalesOrderHdr.lines))
+                .where(StgShopifySalesOrderHdr.run_id == req.run_id)
+            )
+            if req.order_id:
+                stmt = stmt.where(
+                    (StgShopifySalesOrderHdr.shopify_order_id == req.order_id) | 
+                    (StgShopifySalesOrderHdr.order_number == req.order_id)
+                )
+            
+            res = await db.execute(stmt)
+            headers = res.unique().scalars().all()
+            if not headers:
+                raise HTTPException(status_code=404, detail="Order not found for this pipeline run.")
+
+            created_invoices = []
+
+            for hdr in headers:
+                # Check if already invoiced in local DB
+                stmt_inv = select(StgSalesInvoice).where(StgSalesInvoice.hdr_id == hdr.id)
+                res_inv = await db.execute(stmt_inv)
+                existing_inv = res_inv.scalars().first()
+                if existing_inv and existing_inv.erp_invoice_id:
+                    created_invoices.append({
+                        "order_id": hdr.order_number or hdr.shopify_order_id,
+                        "invoice_id": existing_inv.erp_invoice_id,
+                        "status": "ALREADY_EXISTS"
+                    })
+                    continue
+
+                # Query SKU mappings
+                skus = [l.sku for l in hdr.lines if l.sku]
+                stmt_m = select(MapShopifySkuErpItem).where(MapShopifySkuErpItem.shopify_sku.in_(skus))
+                res_m = await db.execute(stmt_m)
+                mappings = {m.shopify_sku: m.erp_item_code for m in res_m.scalars().all()}
+                for s in skus:
+                    if s not in mappings:
+                        matched = await erp_client.get_item(s)
+                        if matched:
+                            mappings[s] = matched.get("name")
+
+                # State and GST mapping
+                state_code_map = {
+                    "jammu and kashmir": "01-Jammu and Kashmir",
+                    "himachal pradesh": "02-Himachal Pradesh",
+                    "punjab": "03-Punjab",
+                    "chandigarh": "04-Chandigarh",
+                    "uttarakhand": "05-Uttarakhand",
+                    "haryana": "06-Haryana",
+                    "delhi": "07-Delhi",
+                    "rajasthan": "08-Rajasthan",
+                    "uttar pradesh": "09-Uttar Pradesh",
+                    "bihar": "10-Bihar",
+                    "sikkim": "11-Sikkim",
+                    "arunachal pradesh": "12-Arunachal Pradesh",
+                    "nagaland": "13-Nagaland",
+                    "manipur": "14-Manipur",
+                    "mizoram": "15-Mizoram",
+                    "tripura": "16-Tripura",
+                    "meghalaya": "17-Meghalaya",
+                    "assam": "18-Assam",
+                    "west bengal": "19-West Bengal",
+                    "jharkhand": "20-Jharkhand",
+                    "odisha": "21-Odisha",
+                    "chhattisgarh": "22-Chhattisgarh",
+                    "madhya pradesh": "23-Madhya Pradesh",
+                    "gujarat": "24-Gujarat",
+                    "daman and diu": "25-Daman and Diu",
+                    "dadra and nagar haveli": "26-Dadra and Nagar Haveli",
+                    "maharashtra": "27-Maharashtra",
+                    "andhra pradesh": "28-Andhra Pradesh",
+                    "karnataka": "29-Karnataka",
+                    "goa": "30-Goa",
+                    "lakshadweep": "31-Lakshadweep",
+                    "kerala": "32-Kerala",
+                    "tamil nadu": "33-Tamil Nadu",
+                    "puducherry": "34-Puducherry",
+                    "andaman and nicobar islands": "35-Andaman and Nicobar Islands",
+                    "telangana": "36-Telangana",
+                    "ladakh": "38-Ladakh"
+                }
+
+                shipping_state_str = (hdr.shipping_state or "Maharashtra").strip().lower()
+                place_of_supply = state_code_map.get(shipping_state_str, "27-Maharashtra")
+                is_intra = (shipping_state_str in ["maharashtra", "mh"])
+
+                items = []
+                max_tax_rate = 0.0
+                for line in hdr.lines:
+                    item_code = mappings.get(line.sku, line.sku)
+                    qty_to_invoice = line.quantity if line.quantity > 0 else 1
+                    
+                    tax_rate_dec = (line.gst_rate or 0.0)
+                    if tax_rate_dec > 0:
+                        max_tax_rate = max(max_tax_rate, tax_rate_dec * 100.0)
+
+                    shopify_unit_price = line.rate if (line.rate and line.rate > 0) else line.price
+                    tax_multiplier = (1.0 + tax_rate_dec) if tax_rate_dec > 0 else 1.0
+
+                    base_price_list_rate = round(shopify_unit_price / tax_multiplier, 2)
+                    shopify_discount = line.discount_amount or 0.0
+                    if shopify_discount > 0:
+                        base_discount_amount = round(shopify_discount / tax_multiplier, 2)
+                        base_rate = round((shopify_unit_price - shopify_discount) / tax_multiplier, 2)
+                    else:
+                        base_discount_amount = 0.0
+                        base_rate = base_price_list_rate
+
+                    item_dict = {
+                        "item_code": item_code,
+                        "qty": qty_to_invoice,
+                        "price_list_rate": base_price_list_rate,
+                        "rate": base_rate,
+                        "warehouse": "Finished Goods - AIPL"
+                    }
+                    if base_discount_amount > 0:
+                        item_dict["discount_amount"] = base_discount_amount
+                    
+                    items.append(item_dict)
+                    line.fulfilled_qty = qty_to_invoice
+                    line.unfulfilled_qty = 0
+                    line.invoicing_status = InvoicingStatus.INVOICED
+
+                if not items:
+                    continue
+
+                taxes_list = []
+                if is_intra:
+                    tax_category = "In-State"
+                    taxes_template = "Output GST In-state - AIPL"
+                    half_rate = max_tax_rate / 2.0 if max_tax_rate > 0 else 2.5
+                    taxes_list = [
+                        {
+                            "charge_type": "On Net Total",
+                            "account_head": "Output Tax CGST - AIPL",
+                            "description": "CGST",
+                            "rate": half_rate,
+                            "cost_center": "Main - AIPL",
+                            "included_in_print_rate": 0
+                        },
+                        {
+                            "charge_type": "On Net Total",
+                            "account_head": "Output Tax SGST - AIPL",
+                            "description": "SGST",
+                            "rate": half_rate,
+                            "cost_center": "Main - AIPL",
+                            "included_in_print_rate": 0
+                        }
+                    ]
+                else:
+                    tax_category = "Out-State"
+                    taxes_template = "Output GST Out-state - AIPL"
+                    tax_pct = max_tax_rate if max_tax_rate > 0 else 12.0
+                    taxes_list = [
+                        {
+                            "charge_type": "On Net Total",
+                            "account_head": "Output Tax IGST - AIPL",
+                            "description": "IGST",
+                            "rate": tax_pct,
+                            "cost_center": "Main - AIPL",
+                            "included_in_print_rate": 0
+                        }
+                    ]
+
+                posting_date_str = hdr.created_at.strftime("%Y-%m-%d") if hdr.created_at else datetime.now().strftime("%Y-%m-%d")
+                posting_time_str = hdr.created_at.strftime("%H:%M:%S") if hdr.created_at else datetime.now().strftime("%H:%M:%S")
+
+                payload = {
+                    "doctype": "Sales Invoice",
+                    "customer": "Shopify Default Customer",
+                    "company": company,
+                    "set_posting_time": 1,
+                    "posting_date": posting_date_str,
+                    "posting_time": posting_time_str,
+                    "po_no": str(hdr.order_number or hdr.shopify_order_id),
+                    "po_date": posting_date_str,
+                    "update_stock": 1,
+                    "tax_category": tax_category,
+                    "place_of_supply": place_of_supply,
+                    "taxes_and_charges": taxes_template,
+                    "taxes": taxes_list,
+                    "items": items
+                }
+
+                resp_inv = await erp_client.client.post("/api/resource/Sales Invoice", json=payload)
+                if resp_inv.status_code not in (200, 201):
+                    err_msg = resp_inv.text
+                    try:
+                        err_msg = resp_inv.json().get("exception", resp_inv.text)
+                    except Exception:
+                        pass
+                    raise HTTPException(status_code=400, detail=f"ERPNext Sales Invoice Error: {err_msg}")
+
+                inv_data = resp_inv.json().get("data", {})
+                new_inv_name = inv_data.get("name")
+
+                stg_invoice = StgSalesInvoice(
+                    run_id=req.run_id,
+                    hdr_id=hdr.id,
+                    erp_invoice_id=new_inv_name,
+                    status=InvoicingStatus.INVOICED
+                )
+                db.add(stg_invoice)
+
+                log = ActivityLog(
+                    run_id=req.run_id,
+                    agent_name="Invoicing",
+                    title="Sales Invoice Created",
+                    description=f"Directly created Sales Invoice {new_inv_name} for order {hdr.order_number or hdr.shopify_order_id}.",
+                    doc_reference=new_inv_name,
+                    type=ActivityType.SUCCESS
+                )
+                db.add(log)
+
+                created_invoices.append({
+                    "order_id": hdr.order_number or hdr.shopify_order_id,
+                    "invoice_id": new_inv_name,
+                    "status": "CREATED"
+                })
+
+            await db.commit()
+
+            return {
+                "success": True,
+                "invoices": created_invoices,
+                "message": f"Successfully created {len(created_invoices)} Sales Invoice(s) in ERPNext."
+            }
+    finally:
+        await erp_client.close()
+

@@ -23,6 +23,8 @@ const Sidebar = ({ currentView, setCurrentView }) => {
         { name: 'Dashboard', icon: 'ri-dashboard-line' },
         { name: 'Pipeline Runs', icon: 'ri-git-merge-line' },
         { name: 'Material Master', icon: 'ri-database-2-line' },
+        { name: 'Recipe Master', icon: 'ri-flask-line' },
+        { name: 'BOM Master', icon: 'ri-node-tree' },
         { name: 'Exception Queue', icon: 'ri-error-warning-line', badge: openExceptions },
         { name: 'Inventory Report', icon: 'ri-stock-line' },
         { name: 'Settings', icon: 'ri-settings-4-line' }

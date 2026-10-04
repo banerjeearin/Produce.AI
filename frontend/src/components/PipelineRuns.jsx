@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { 
     getActivities, deleteRunData, getRunState, resumeRun, 
     autoRunPipeline, massAutoRunPipelines, getErpItems, updateSkuMapping,
-    fetchBomSummary 
+    fetchBomSummary, createSelectedBoms, createSalesInvoice
 } from '../services/api';
 
 const PipelineRuns = ({ dateFrom, dateTo }) => {
@@ -20,6 +20,10 @@ const PipelineRuns = ({ dateFrom, dateTo }) => {
     const [copiedDocId, setCopiedDocId] = useState(null);
     const [bomSummaryData, setBomSummaryData] = useState(null);
     const [isBomSummaryOpen, setIsBomSummaryOpen] = useState(true);
+    const [isRefreshing, setIsRefreshing] = useState(false);
+    const [selectedBomKeys, setSelectedBomKeys] = useState([]); // Array of group_keys (or erp_code / sku)
+    const [isCreatingBoms, setIsCreatingBoms] = useState(false);
+    const [creatingInvoiceRunId, setCreatingInvoiceRunId] = useState(null);
 
     const loadBomSummary = async () => {
         try {
@@ -30,14 +34,101 @@ const PipelineRuns = ({ dateFrom, dateTo }) => {
         }
     };
 
+    // Toggle individual BOM selection
+    const handleToggleSelectBom = (itemKey) => {
+        setSelectedBomKeys(prev => 
+            prev.includes(itemKey) ? prev.filter(k => k !== itemKey) : [...prev, itemKey]
+        );
+    };
+
+    // Select all / Deselect all actionable items (only items that have Recipe Ready and no active BOM yet)
+    const handleSelectAllBoms = (eligibleItems) => {
+        const eligibleKeys = eligibleItems.map(it => it.erp_material_code || it.shopify_sku);
+        if (selectedBomKeys.length === eligibleKeys.length && eligibleKeys.length > 0) {
+            setSelectedBomKeys([]);
+        } else {
+            setSelectedBomKeys(eligibleKeys);
+        }
+    };
+
+    // Trigger batch creation of selected BOMs in ERPNext
+    const handleBatchCreateBoms = async (eligibleItems) => {
+        const targetItems = eligibleItems.filter(it => 
+            selectedBomKeys.includes(it.erp_material_code || it.shopify_sku)
+        );
+
+        if (targetItems.length === 0) {
+            alert('Please select at least one item with a ready recipe to create BOMs.');
+            return;
+        }
+
+        if (!window.confirm(`Create default BOM in ERPNext for ${targetItems.length} selected item(s) from Recipe Master?`)) {
+            return;
+        }
+
+        setIsCreatingBoms(true);
+        try {
+            const payload = targetItems.map(it => ({
+                erp_item_code: it.erp_material_code,
+                shopify_sku: it.shopify_sku,
+                quantity: it.total_ordered_qty || 1.0
+            }));
+            const res = await createSelectedBoms(payload);
+            alert(res.message || 'BOM creation completed.');
+            setSelectedBomKeys([]);
+            await loadBomSummary();
+        } catch (err) {
+            alert(err.message || 'Failed to create BOMs');
+        } finally {
+            setIsCreatingBoms(false);
+        }
+    };
+
+    const handleCreateInvoice = async (runId, orderId = null) => {
+        if (!window.confirm(`Create ERPNext Sales Invoice for this order now with available stock?`)) {
+            return;
+        }
+        setCreatingInvoiceRunId(runId);
+        try {
+            const res = await createSalesInvoice(runId, orderId);
+            alert(res.message || 'Sales Invoice created successfully!');
+            await Promise.all([
+                fetchAllActivities(),
+                (async () => {
+                    const st = await getRunState(runId);
+                    setRunStates(prev => ({ ...prev, [runId]: st }));
+                })()
+            ]);
+        } catch (err) {
+            alert(err.message || 'Failed to create Sales Invoice');
+        } finally {
+            setCreatingInvoiceRunId(null);
+        }
+    };
+
+    const handleManualRefresh = async () => {
+        setIsRefreshing(true);
+        try {
+            await Promise.all([
+                fetchAllActivities(),
+                loadBomSummary(),
+                getErpItems().then(res => {
+                    if (res && res.items) setErpItemsList(res.items);
+                }).catch(() => {})
+            ]);
+        } finally {
+            setIsRefreshing(false);
+        }
+    };
+
     const fetchAllActivities = async () => {
         try {
             // Fetch activities filtered by selected date range
             const data = await getActivities(300, dateFrom, dateTo);
             setActivities(data);
             
-            // Fetch HITL states for all unique runs in parallel for instant loading
-            const uniqueRunIds = [...new Set(data.map(d => d.run_id).filter(Boolean))];
+            // Fetch HITL states for the most recent active runs in parallel
+            const uniqueRunIds = [...new Set(data.map(d => d.run_id).filter(Boolean))].slice(0, 25);
             const states = {};
             const results = await Promise.allSettled(
                 uniqueRunIds.map(async (rId) => {
@@ -215,8 +306,18 @@ const PipelineRuns = ({ dateFrom, dateTo }) => {
         });
     };
 
-    const toggleRun = (runId) => {
+    const toggleRun = async (runId) => {
         setExpandedRuns(prev => ({ ...prev, [runId]: !prev[runId] }));
+        if (!runStates[runId]) {
+            try {
+                const st = await getRunState(runId);
+                if (st && st.status !== 'NOT_FOUND') {
+                    setRunStates(prev => ({ ...prev, [runId]: st }));
+                }
+            } catch (err) {
+                console.error(`Failed to load state for run ${runId}:`, err);
+            }
+        }
     };
 
     const groupedRuns = activities.reduce((acc, act) => {
@@ -288,6 +389,30 @@ const PipelineRuns = ({ dateFrom, dateTo }) => {
                         {Object.keys(groupedRuns).length} Total Runs
                     </span>
 
+                    {/* Refresh / Recalculate Status Button */}
+                    <button
+                        onClick={handleManualRefresh}
+                        disabled={isRefreshing}
+                        style={{
+                            background: 'rgba(255, 255, 255, 0.08)',
+                            color: '#e2e8f0',
+                            border: '1px solid rgba(255, 255, 255, 0.15)',
+                            padding: '0.5rem 1rem',
+                            borderRadius: '8px',
+                            cursor: isRefreshing ? 'not-allowed' : 'pointer',
+                            fontWeight: '600',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '0.5rem',
+                            fontSize: '0.85rem',
+                            transition: 'all 0.2s ease'
+                        }}
+                        title="Recheck ERPNext, Shopify orders, and recalculate latest BOM & pipeline status"
+                    >
+                        <i className={isRefreshing ? "ri-loader-4-line spin" : "ri-refresh-line"}></i>
+                        <span>{isRefreshing ? 'Recalculating...' : 'Refresh Status'}</span>
+                    </button>
+
                     {/* Mass Auto-Process Button */}
                     <button
                         onClick={handleMassAutoRun}
@@ -355,17 +480,112 @@ const PipelineRuns = ({ dateFrom, dateTo }) => {
                                 </span>
                             )}
                         </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-                            <span>{isBomSummaryOpen ? 'Hide Summary' : 'View Details'}</span>
-                            <i className={`ri-arrow-${isBomSummaryOpen ? 'up' : 'down'}-s-line`} style={{ fontSize: '1.2rem' }}></i>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                            <button
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleManualRefresh();
+                                }}
+                                disabled={isRefreshing}
+                                style={{
+                                    background: 'rgba(99, 102, 241, 0.2)',
+                                    color: '#c7d2fe',
+                                    border: '1px solid rgba(99, 102, 241, 0.4)',
+                                    padding: '0.25rem 0.65rem',
+                                    borderRadius: '6px',
+                                    cursor: isRefreshing ? 'not-allowed' : 'pointer',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '0.35rem',
+                                    fontSize: '0.78rem'
+                                }}
+                                title="Recheck Shopify and ERPNext for latest order demand and active BOMs"
+                            >
+                                <i className={isRefreshing ? "ri-loader-4-line spin" : "ri-refresh-line"}></i>
+                                <span>{isRefreshing ? 'Recalculating...' : 'Recalculate BOMs'}</span>
+                            </button>
+                            <span style={{ cursor: 'pointer' }}>{isBomSummaryOpen ? 'Hide Summary' : 'View Details'}</span>
+                            <i className={`ri-arrow-${isBomSummaryOpen ? 'up' : 'down'}-s-line`} style={{ fontSize: '1.2rem', cursor: 'pointer' }}></i>
                         </div>
                     </div>
 
-                    {isBomSummaryOpen && (
+                    {isBomSummaryOpen && (() => {
+                        // Filter items that have Recipe Ready and no active BOM yet
+                        const actionableItems = bomSummaryData.summary.filter(it => 
+                            it.bom_status === 'RECIPE_READY' && !it.existing_bom && it.erp_material_code
+                        );
+                        const isAllActionableSelected = actionableItems.length > 0 && 
+                            actionableItems.every(it => selectedBomKeys.includes(it.erp_material_code || it.shopify_sku));
+
+                        return (
                         <div style={{ padding: '1rem', overflowX: 'auto' }}>
+                            {/* Action Bar when recipe-ready items exist */}
+                            {actionableItems.length > 0 && (
+                                <div style={{ 
+                                    display: 'flex', 
+                                    justifyContent: 'space-between', 
+                                    alignItems: 'center', 
+                                    marginBottom: '0.85rem',
+                                    padding: '0.65rem 1rem',
+                                    background: 'rgba(99, 102, 241, 0.08)',
+                                    borderRadius: '8px',
+                                    border: '1px solid rgba(99, 102, 241, 0.2)'
+                                }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                        <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.45rem', cursor: 'pointer', fontSize: '0.85rem', color: '#c7d2fe' }}>
+                                            <input
+                                                type="checkbox"
+                                                checked={isAllActionableSelected}
+                                                onChange={() => handleSelectAllBoms(actionableItems)}
+                                                style={{ width: '16px', height: '16px', accentColor: '#6366f1', cursor: 'pointer' }}
+                                            />
+                                            <span>
+                                                Select All Recipe-Ready Items ({selectedBomKeys.filter(k => actionableItems.some(it => (it.erp_material_code || it.shopify_sku) === k)).length}/{actionableItems.length})
+                                            </span>
+                                        </label>
+                                    </div>
+
+                                    <button
+                                        onClick={() => handleBatchCreateBoms(actionableItems)}
+                                        disabled={isCreatingBoms || selectedBomKeys.length === 0}
+                                        className="btn btn-primary"
+                                        style={{
+                                            padding: '0.45rem 1rem',
+                                            fontSize: '0.82rem',
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            gap: '0.45rem',
+                                            background: selectedBomKeys.length > 0 ? 'linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)' : 'rgba(255,255,255,0.05)',
+                                            color: selectedBomKeys.length > 0 ? '#fff' : 'var(--text-muted)',
+                                            cursor: selectedBomKeys.length > 0 ? 'pointer' : 'not-allowed',
+                                            border: 'none',
+                                            boxShadow: selectedBomKeys.length > 0 ? '0 4px 12px rgba(99, 102, 241, 0.35)' : 'none'
+                                        }}
+                                        title="Create default BOM in ERPNext for selected recipe-ready items"
+                                    >
+                                        <i className={isCreatingBoms ? "ri-loader-4-line spin" : "ri-tools-fill"}></i>
+                                        <span>
+                                            {isCreatingBoms 
+                                                ? 'Creating BOMs in ERPNext...' 
+                                                : `Create Selected BOMs (${selectedBomKeys.length})`}
+                                        </span>
+                                    </button>
+                                </div>
+                            )}
+
                             <table className="data-table" style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.82rem' }}>
                                 <thead>
                                     <tr style={{ background: 'rgba(255,255,255,0.03)' }}>
+                                        <th style={{ width: '40px', textAlign: 'center', padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border-color)' }}>
+                                            <input
+                                                type="checkbox"
+                                                disabled={actionableItems.length === 0}
+                                                checked={isAllActionableSelected}
+                                                onChange={() => handleSelectAllBoms(actionableItems)}
+                                                style={{ width: '15px', height: '15px', accentColor: '#6366f1', cursor: actionableItems.length > 0 ? 'pointer' : 'not-allowed' }}
+                                                title={actionableItems.length > 0 ? "Select/Deselect all Recipe-Ready items" : "No recipe-ready items available"}
+                                            />
+                                        </th>
                                         <th style={{ textAlign: 'left', padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border-color)' }}>Shopify SKU</th>
                                         <th style={{ textAlign: 'left', padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border-color)' }}>ERP Material Code</th>
                                         <th style={{ textAlign: 'left', padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border-color)' }}>Finished Good Item Name</th>
@@ -379,8 +599,36 @@ const PipelineRuns = ({ dateFrom, dateTo }) => {
                                     {bomSummaryData.summary.map((item, sIdx) => {
                                         const isSkuCopied = copiedDocId === `bom-sku-${item.shopify_sku}`;
                                         const isMatCopied = copiedDocId === `bom-mat-${item.erp_material_code}`;
+                                        const itemKey = item.erp_material_code || item.shopify_sku;
+                                        const isActionable = item.bom_status === 'RECIPE_READY' && !item.existing_bom && Boolean(item.erp_material_code);
+                                        const isSelected = selectedBomKeys.includes(itemKey);
+
                                         return (
-                                            <tr key={sIdx} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                                            <tr key={sIdx} style={{ 
+                                                borderBottom: '1px solid rgba(255,255,255,0.04)',
+                                                background: isSelected ? 'rgba(99, 102, 241, 0.07)' : 'transparent'
+                                            }}>
+                                                {/* Checkbox column */}
+                                                <td style={{ width: '40px', textAlign: 'center', padding: '0.5rem 0.75rem' }}>
+                                                    {isActionable ? (
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={isSelected}
+                                                            onChange={() => handleToggleSelectBom(itemKey)}
+                                                            style={{ width: '15px', height: '15px', accentColor: '#6366f1', cursor: 'pointer' }}
+                                                            title="Select for BOM creation"
+                                                        />
+                                                    ) : (
+                                                        <input
+                                                            type="checkbox"
+                                                            disabled
+                                                            checked={item.bom_status === 'ACTIVE'}
+                                                            style={{ width: '15px', height: '15px', opacity: 0.3, cursor: 'not-allowed' }}
+                                                            title={item.bom_status === 'ACTIVE' ? "BOM already exists" : "Recipe must be maintained first"}
+                                                        />
+                                                    )}
+                                                </td>
+
                                                 {/* Shopify SKU */}
                                                 <td style={{ padding: '0.5rem 0.75rem', fontFamily: 'monospace', color: '#93c5fd', fontWeight: '500' }}>
                                                     <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
@@ -517,7 +765,8 @@ const PipelineRuns = ({ dateFrom, dateTo }) => {
                                 </tbody>
                             </table>
                         </div>
-                    )}
+                        );
+                    })()}
                 </div>
             )}
             
@@ -812,24 +1061,49 @@ const PipelineRuns = ({ dateFrom, dateTo }) => {
                                                                                             </button>
                                                                                         </div>
                                                                                     ) : (
-                                                                                        <button 
-                                                                                            onClick={() => setEditingMapping({ runId, sku, erpCode })}
-                                                                                            style={{ 
-                                                                                                background: 'rgba(99, 102, 241, 0.15)', 
-                                                                                                color: '#818cf8', 
-                                                                                                border: '1px solid rgba(99, 102, 241, 0.3)', 
-                                                                                                borderRadius: '4px', 
-                                                                                                padding: '0.25rem 0.55rem', 
-                                                                                                cursor: 'pointer', 
-                                                                                                fontSize: '0.75rem',
-                                                                                                display: 'inline-flex',
-                                                                                                alignItems: 'center',
-                                                                                                gap: '0.25rem'
-                                                                                            }}
-                                                                                            title="Edit Classification Mapping"
-                                                                                        >
-                                                                                            <i className="ri-edit-line"></i> Edit
-                                                                                        </button>
+                                                                                        <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
+                                                                                            <button 
+                                                                                                onClick={() => setEditingMapping({ runId, sku, erpCode })}
+                                                                                                style={{ 
+                                                                                                    background: 'rgba(99, 102, 241, 0.15)', 
+                                                                                                    color: '#818cf8', 
+                                                                                                    border: '1px solid rgba(99, 102, 241, 0.3)', 
+                                                                                                    borderRadius: '4px', 
+                                                                                                    padding: '0.25rem 0.55rem', 
+                                                                                                    cursor: 'pointer', 
+                                                                                                    fontSize: '0.75rem',
+                                                                                                    display: 'inline-flex',
+                                                                                                    alignItems: 'center',
+                                                                                                    gap: '0.25rem'
+                                                                                                }}
+                                                                                                title="Edit Classification Mapping"
+                                                                                            >
+                                                                                                <i className="ri-edit-line"></i> Edit
+                                                                                            </button>
+                                                                                            {stock >= qty && (
+                                                                                                <button 
+                                                                                                    onClick={() => handleCreateInvoice(runId, order.name || order.id)}
+                                                                                                    disabled={creatingInvoiceRunId === runId}
+                                                                                                    style={{ 
+                                                                                                        background: 'rgba(16, 185, 129, 0.2)', 
+                                                                                                        color: '#34d399', 
+                                                                                                        border: '1px solid rgba(16, 185, 129, 0.4)', 
+                                                                                                        borderRadius: '4px', 
+                                                                                                        padding: '0.25rem 0.6rem', 
+                                                                                                        cursor: 'pointer', 
+                                                                                                        fontSize: '0.75rem',
+                                                                                                        display: 'inline-flex',
+                                                                                                        alignItems: 'center',
+                                                                                                        gap: '0.25rem',
+                                                                                                        fontWeight: '600'
+                                                                                                    }}
+                                                                                                    title="Create Sales Invoice in ERPNext from available stock"
+                                                                                                >
+                                                                                                    <i className={creatingInvoiceRunId === runId ? "ri-loader-4-line spin" : "ri-file-text-line"}></i>
+                                                                                                    {creatingInvoiceRunId === runId ? 'Invoicing...' : 'Create Invoice'}
+                                                                                                </button>
+                                                                                            )}
+                                                                                        </div>
                                                                                     )}
                                                                                 </td>
                                                                             </tr>
@@ -945,6 +1219,36 @@ const PipelineRuns = ({ dateFrom, dateTo }) => {
                                                         <i className={autoRunningRunId === runId ? "ri-loader-4-line spin" : "ri-flashlight-line"} style={{ fontSize: '1.1rem' }}></i> 
                                                         {autoRunningRunId === runId ? 'Auto-Running All Stages...' : 'Auto-Run All Remaining Stages'}
                                                     </button>
+
+                                                    {/* 3. Direct Invoice Action if Stock is Available */}
+                                                    {runState.values.raw_orders?.some(o => 
+                                                        (o.line_items || []).every(it => {
+                                                            const sku = it.sku || it.name;
+                                                            return (runState.values.stock_balances?.[sku] ?? 0) >= (it.quantity || 1);
+                                                        })
+                                                    ) && (
+                                                        <button
+                                                            onClick={() => handleCreateInvoice(runId)}
+                                                            disabled={creatingInvoiceRunId === runId}
+                                                            style={{ 
+                                                                background: 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)', 
+                                                                color: 'white', 
+                                                                border: 'none', 
+                                                                padding: '0.75rem 1.5rem', 
+                                                                borderRadius: '8px', 
+                                                                cursor: 'pointer', 
+                                                                fontWeight: 'bold', 
+                                                                display: 'flex', 
+                                                                alignItems: 'center', 
+                                                                gap: '0.5rem',
+                                                                boxShadow: '0 4px 14px rgba(2, 132, 199, 0.35)'
+                                                            }}
+                                                            title="Generate ERPNext Sales Invoice immediately from available stock"
+                                                        >
+                                                            <i className={creatingInvoiceRunId === runId ? "ri-loader-4-line spin" : "ri-file-text-line"} style={{ fontSize: '1.1rem' }}></i> 
+                                                            {creatingInvoiceRunId === runId ? 'Creating Sales Invoice...' : 'Generate Sales Invoice'}
+                                                        </button>
+                                                    )}
                                                 </div>
                                             </div>
                                         )}

@@ -38,7 +38,15 @@ async def check_material_master_status(identifier: str) -> Dict[str, Any]:
             local_mapped_code = mapping.erp_item_code if mapping else None
 
         # Check ERPNext existence
-        erp_item = await erp_client.get_item(local_mapped_code or clean_id)
+        # 1. Try local mapped code first if available
+        erp_item = None
+        if local_mapped_code:
+            erp_item = await erp_client.get_item(local_mapped_code)
+            
+        # 2. If mapped code was obsolete/missing or not found in ERPNext, check ERPNext directly by clean_id
+        if not erp_item:
+            erp_item = await erp_client.get_item(clean_id)
+
         exists_in_erp = erp_item is not None
         
         return {
@@ -48,7 +56,8 @@ async def check_material_master_status(identifier: str) -> Dict[str, Any]:
             "erp_item_name": erp_item.get("item_name") if erp_item else None,
             "item_group": erp_item.get("item_group") if erp_item else None,
             "stock_uom": erp_item.get("stock_uom") if erp_item else None,
-            "is_mapped_locally": local_mapped_code is not None
+            "is_mapped_locally": local_mapped_code is not None,
+            "local_mapped_code": local_mapped_code
         }
     finally:
         await erp_client.close()
