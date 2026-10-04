@@ -10,6 +10,20 @@ import InventoryReport from './components/InventoryReport';
 
 function App() {
   const [currentView, setCurrentView] = useState('Dashboard');
+  const [dateFrom, setDateFrom] = useState(new Date(2025, 6, 1)); // 01.07.2025
+  const [dateTo, setDateTo] = useState(new Date(2025, 6, 31));  // 31.07.2025
+
+  // Format dates as DD.MM.YYYY
+  const formatStr = (d) => {
+    if (!d) return null;
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const yyyy = d.getFullYear();
+    return `${dd}.${mm}.${yyyy}`;
+  };
+
+  const formattedDateFrom = formatStr(dateFrom);
+  const formattedDateTo = formatStr(dateTo);
 
   useEffect(() => {
     // Simple micro-interaction script from mockup
@@ -25,17 +39,17 @@ function App() {
     if (currentView === 'Dashboard') {
       return (
         <>
-          <StatsGrid />
+          <StatsGrid dateFrom={formattedDateFrom} dateTo={formattedDateTo} />
           <div className="dashboard-content">
             <ExceptionTable />
-            <ActivityFeed />
+            <ActivityFeed dateFrom={formattedDateFrom} dateTo={formattedDateTo} />
           </div>
         </>
       );
     }
     
     if (currentView === 'Pipeline Runs') {
-      return <PipelineRuns />;
+      return <PipelineRuns dateFrom={formattedDateFrom} dateTo={formattedDateTo} />;
     }
     
     if (currentView === 'Exception Queue') {
@@ -66,7 +80,12 @@ function App() {
     <div className="app-container">
       <Sidebar currentView={currentView} setCurrentView={setCurrentView} />
       <main className="main-content">
-        <TopHeader />
+        <TopHeader 
+          dateFrom={dateFrom} 
+          setDateFrom={setDateFrom} 
+          dateTo={dateTo} 
+          setDateTo={setDateTo} 
+        />
         {renderView()}
       </main>
     </div>
@@ -74,3 +93,4 @@ function App() {
 }
 
 export default App;
+

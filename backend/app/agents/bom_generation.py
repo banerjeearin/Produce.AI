@@ -195,19 +195,29 @@ async def bom_generation_agent(state: AgentState) -> AgentState:
             bom_names = []
             for code in erp_codes:
                 bom_doc = await erp_client.get_bom(code)
-                if bom_doc:
+                if bom_doc and bom_doc.get("name"):
                     bom_names.append(bom_doc.get("name"))
             
-            doc_ref = ", ".join(bom_names) if bom_names else ", ".join(erp_codes)
-
-            log = ActivityLog(
-                run_id=state.get("run_id"),
-                agent_name="BOM Generation",
-                title="BOM Verified",
-                description=f"Verified BOMs for {len(classified_skus)} ERP items: {', '.join(list(classified_skus))}",
-                doc_reference=doc_ref,
-                type=ActivityType.SUCCESS
-            )
+            if bom_names:
+                doc_ref = ", ".join(bom_names)
+                log = ActivityLog(
+                    run_id=state.get("run_id"),
+                    agent_name="BOM Generation",
+                    title="BOM Verified & Active",
+                    description=f"Verified active BOM in ERPNext for {len(bom_names)} item(s): {', '.join(bom_names)}",
+                    doc_reference=doc_ref,
+                    type=ActivityType.SUCCESS
+                )
+            else:
+                doc_ref = ", ".join(erp_codes)
+                log = ActivityLog(
+                    run_id=state.get("run_id"),
+                    agent_name="BOM Generation",
+                    title="BOM Not Found / Creation Pending",
+                    description=f"Could not verify or create active BOM for: {', '.join(classified_skus)}",
+                    doc_reference=doc_ref,
+                    type=ActivityType.WARNING
+                )
             db.add(log)
             await db.commit()
     

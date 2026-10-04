@@ -1,7 +1,11 @@
 const BASE_URL = 'http://localhost:8000/api';
 
-export const fetchStats = async () => {
-    const res = await fetch(`${BASE_URL}/dashboard/stats`);
+export const fetchStats = async (dateFrom, dateTo) => {
+    const params = new URLSearchParams();
+    if (dateFrom) params.append('date_from', dateFrom);
+    if (dateTo) params.append('date_to', dateTo);
+    const query = params.toString() ? `?${params.toString()}` : '';
+    const res = await fetch(`${BASE_URL}/dashboard/stats${query}`);
     if (!res.ok) throw new Error('Failed to fetch stats');
     return res.json();
 };
@@ -35,8 +39,13 @@ export const runPipeline = async (dateFrom, dateTo) => {
     return res.json();
 };
 
-export const getActivities = async (limit = 15) => {
-    const res = await fetch(`${BASE_URL}/dashboard/activities?limit=${limit}`);
+export const getActivities = async (limit = 100, dateFrom, dateTo) => {
+    const params = new URLSearchParams();
+    if (limit) params.append('limit', limit);
+    if (dateFrom) params.append('date_from', dateFrom);
+    if (dateTo) params.append('date_to', dateTo);
+    const query = params.toString() ? `?${params.toString()}` : '';
+    const res = await fetch(`${BASE_URL}/dashboard/activities${query}`);
     if (!res.ok) throw new Error('Failed to fetch activities');
     return res.json();
 };
@@ -70,6 +79,26 @@ export const resumeRun = async (runId) => {
     return res.json();
 };
 
+export const autoRunPipeline = async (runId) => {
+    const res = await fetch(`${BASE_URL}/pipeline/runs/${runId}/auto-run`, {
+        method: 'POST',
+    });
+    if (!res.ok) throw new Error(`Failed to auto-run pipeline ${runId}`);
+    return res.json();
+};
+
+export const massAutoRunPipelines = async (runIds) => {
+    const res = await fetch(`${BASE_URL}/pipeline/runs/mass-auto-run`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ run_ids: runIds })
+    });
+    if (!res.ok) throw new Error('Failed to start mass auto-processing');
+    return res.json();
+};
+
 export const getErpItems = async () => {
     const res = await fetch(`${BASE_URL}/pipeline/erp-items`);
     if (!res.ok) throw new Error('Failed to fetch ERPNext items');
@@ -89,5 +118,15 @@ export const updateSkuMapping = async (shopifySku, erpItemCode, runId) => {
         })
     });
     if (!res.ok) throw new Error('Failed to update SKU mapping');
+    return res.json();
+};
+
+export const fetchBomSummary = async (dateFrom, dateTo) => {
+    const params = new URLSearchParams();
+    if (dateFrom) params.append('date_from', dateFrom);
+    if (dateTo) params.append('date_to', dateTo);
+    const query = params.toString() ? `?${params.toString()}` : '';
+    const res = await fetch(`${BASE_URL}/pipeline/bom-summary${query}`);
+    if (!res.ok) throw new Error('Failed to fetch BOM summary');
     return res.json();
 };

@@ -98,7 +98,7 @@ async def run_pipeline(run_id: str, raw_orders: list = None, date_from=None, dat
 
 async def resume_pipeline(run_id: str):
     """
-    Resumes a paused pipeline thread.
+    Resumes a paused pipeline thread for a single stage.
     """
     config = {"configurable": {"thread_id": run_id}}
     async with AsyncSqliteSaver.from_conn_string("checkpoints.sqlite") as memory:
@@ -115,6 +115,30 @@ async def get_pipeline_state(run_id: str):
     async with AsyncSqliteSaver.from_conn_string("checkpoints.sqlite") as memory:
         orchestrator = graph.compile(checkpointer=memory, interrupt_after=interrupts)
         return await orchestrator.aget_state(config)
+
+async def auto_run_pipeline(run_id: str):
+    """
+    Auto-executes all remaining stages of a pipeline run until completion.
+    """
+    config = {"configurable": {"thread_id": run_id}}
+    async with AsyncSqliteSaver.from_conn_string("checkpoints.sqlite") as memory:
+        orchestrator = graph.compile(checkpointer=memory, interrupt_after=interrupts)
+        state = await orchestrator.aget_state(config)
+        while state and len(state.next) > 0:
+            await orchestrator.ainvoke(None, config)
+            state = await orchestrator.aget_state(config)
+        return state
+
+async def auto_run_all_active_runs(run_ids: list):
+    """
+    Mass executes all given run_ids through all pipeline stages.
+    """
+    for r_id in run_ids:
+        try:
+            await auto_run_pipeline(r_id)
+        except Exception as e:
+            print(f"Error auto-running pipeline {r_id}: {e}")
+
 
 
 

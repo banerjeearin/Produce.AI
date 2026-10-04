@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { fetchStats } from '../services/api';
 
-const StatsGrid = () => {
+const StatsGrid = ({ dateFrom, dateTo }) => {
     const [stats, setStats] = useState({
         orders_processed: 0,
         work_orders_created: 0,
@@ -9,12 +9,13 @@ const StatsGrid = () => {
     });
 
     useEffect(() => {
-        fetchStats().then(setStats).catch(console.error);
-        const interval = setInterval(() => {
-            fetchStats().then(setStats).catch(console.error);
-        }, 5000);
+        const load = () => {
+            fetchStats(dateFrom, dateTo).then(setStats).catch(console.error);
+        };
+        load();
+        const interval = setInterval(load, 5000);
         return () => clearInterval(interval);
-    }, []);
+    }, [dateFrom, dateTo]);
 
     return (
         <section className="stats-grid">

@@ -1,8 +1,11 @@
 from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
-from app.agents.orchestrator import run_pipeline, resume_pipeline, get_pipeline_state
+from app.agents.orchestrator import (
+    run_pipeline, resume_pipeline, get_pipeline_state, 
+    auto_run_pipeline, auto_run_all_active_runs
+)
 from app.services.shopify_client import fetch_shopify_orders
 import os
 import uuid
@@ -185,7 +188,7 @@ async def get_run_state(run_id: str):
                 if isinstance(r, dict) and r.get("item_code"):
                     code = str(r.get("item_code")).strip()
                     qty = float(r.get("bal_qty", 0.0))
-                    stock_dict[code] = qty
+                    stock_dict[code] = stock_dict.get(code, 0.0) + qty
             
             for s in skus_to_check:
                 erp_code = erp_item_map.get(s, s)
@@ -251,6 +254,122 @@ async def get_erp_items():
     finally:
         await erp_client.close()
 
+@router.get("/bom-summary")
+async def get_bom_summary(date_from: Optional[str] = None, date_to: Optional[str] = None):
+    """
+    Summarizes all Finished Goods items and BOM creation requirements for the selected date period.
+    """
+    from app.services.shopify_client import fetch_shopify_orders
+    from app.services.erpnext_client import ERPNextClient
+    from app.db.session import AsyncSessionLocal
+    from app.models import MapShopifySkuErpItem, BomRecipeMaster
+    from sqlalchemy.future import select
+
+    parsed_from = parse_date(date_from, end_of_day=False)
+    parsed_to = parse_date(date_to, end_of_day=True)
+
+    orders = await fetch_shopify_orders(parsed_from, parsed_to)
+    if not orders:
+        return {"summary": [], "total_items": 0, "active_boms": 0, "missing_boms": 0}
+
+    erp_client = ERPNextClient()
+    try:
+        # 1. Fetch ERPNext items map
+        resp_items = await erp_client.client.get('/api/resource/Item?fields=["name","item_code","item_name","stock_uom"]&limit_page_length=500')
+        erp_items = {}
+        if resp_items.status_code == 200:
+            for it in resp_items.json().get("data", []):
+                erp_items[it["name"]] = it.get("item_name")
+
+        # 2. Fetch active ERPNext BOMs map
+        resp_boms = await erp_client.client.get('/api/resource/BOM?fields=["name","item","is_active","is_default"]&limit_page_length=500')
+        existing_boms = {}
+        if resp_boms.status_code == 200:
+            for b in resp_boms.json().get("data", []):
+                if b.get("is_active"):
+                    existing_boms[b.get("item")] = b.get("name")
+    finally:
+        await erp_client.close()
+
+    # 3. Fetch local mapping and recipe records
+    async with AsyncSessionLocal() as db:
+        res_map = await db.execute(select(MapShopifySkuErpItem))
+        mappings = {m.shopify_sku: m.erp_item_code for m in res_map.scalars().all()}
+
+        res_recipes = await db.execute(select(BomRecipeMaster))
+        recipes = res_recipes.scalars().all()
+        recipe_fgs = set(r.fg_item_code for r in recipes)
+
+    # 4. Helper to resolve ERP item with fuzzy/size matcher if not in mappings
+    erp_matcher_client = ERPNextClient()
+    cached_sku_resolutions = {}
+
+    try:
+        # 5. Aggregate by Material Code & Shopify SKU
+        summary_map = {}
+        for o in orders:
+            for it in o.get("line_items", []):
+                sku = it.get("sku") or it.get("name")
+                title = it.get("title") or it.get("name") or sku
+                qty = int(it.get("quantity", 1))
+                
+                # Resolve ERP Material Code:
+                # Check local mapping first
+                mapped_erp_code = mappings.get(sku)
+                if not mapped_erp_code:
+                    if sku in erp_items:
+                        mapped_erp_code = sku
+                    elif sku in cached_sku_resolutions:
+                        mapped_erp_code = cached_sku_resolutions[sku]
+                    else:
+                        matched_item = await erp_matcher_client.get_item(sku, title=title)
+                        if matched_item and matched_item.get("name"):
+                            mapped_erp_code = matched_item.get("name")
+                            # Auto-cache into MapShopifySkuErpItem so it persists
+                            async with AsyncSessionLocal() as db_inner:
+                                new_m = MapShopifySkuErpItem(shopify_sku=sku, erp_item_code=mapped_erp_code)
+                                db_inner.add(new_m)
+                                await db_inner.commit()
+                            mappings[sku] = mapped_erp_code
+                        else:
+                            mapped_erp_code = None
+                        cached_sku_resolutions[sku] = mapped_erp_code
+
+                erp_code_display = mapped_erp_code or None
+                item_name = (erp_items.get(mapped_erp_code) if mapped_erp_code else None) or title
+                bom_id = existing_boms.get(mapped_erp_code) if mapped_erp_code else None
+                has_recipe = (mapped_erp_code in recipe_fgs) or (sku in recipe_fgs)
+
+                # Grouping key: preferably mapped ERP code, otherwise raw SKU
+                group_key = mapped_erp_code or sku
+
+                if group_key not in summary_map:
+                    summary_map[group_key] = {
+                        "erp_material_code": erp_code_display,
+                        "shopify_sku": sku,
+                        "item_name": item_name,
+                        "total_ordered_qty": 0,
+                        "orders_count": 0,
+                        "existing_bom": bom_id,
+                        "has_recipe": has_recipe,
+                        "bom_status": "ACTIVE" if bom_id else ("RECIPE_READY" if has_recipe else "NEEDS_RECIPE")
+                    }
+                summary_map[group_key]["total_ordered_qty"] += qty
+                summary_map[group_key]["orders_count"] += 1
+    finally:
+        await erp_matcher_client.close()
+
+    summary_list = sorted(list(summary_map.values()), key=lambda x: x["total_ordered_qty"], reverse=True)
+    active_count = sum(1 for s in summary_list if s["bom_status"] == "ACTIVE")
+    missing_count = sum(1 for s in summary_list if s["bom_status"] != "ACTIVE")
+
+    return {
+        "summary": summary_list,
+        "total_items": len(summary_list),
+        "active_boms": active_count,
+        "missing_boms": missing_count
+    }
+
 @router.post("/mapping/update")
 async def update_sku_mapping(req: MappingUpdateRequest):
     """
@@ -297,10 +416,30 @@ async def update_sku_mapping(req: MappingUpdateRequest):
 @router.post("/runs/{run_id}/resume")
 async def resume_run(run_id: str):
     """
-    Resumes a paused pipeline thread synchronously so the frontend can get the updated state immediately.
+    Resumes a paused pipeline thread synchronously for a single stage.
     """
     await resume_pipeline(run_id)
     return {"message": f"Resumed pipeline for run {run_id}"}
+
+@router.post("/runs/{run_id}/auto-run")
+async def auto_run_single_pipeline(run_id: str):
+    """
+    Automatically runs all remaining pipeline stages for a single run until completion.
+    """
+    await auto_run_pipeline(run_id)
+    return {"message": f"Auto-processed all stages for run {run_id}"}
+
+class MassRunRequest(BaseModel):
+    run_ids: List[str]
+
+@router.post("/runs/mass-auto-run")
+async def mass_auto_run_pipelines(req: MassRunRequest, background_tasks: BackgroundTasks):
+    """
+    Mass-executes all remaining stages across all provided run IDs in background or concurrently.
+    """
+    background_tasks.add_task(auto_run_all_active_runs, req.run_ids)
+    return {"message": f"Started mass automatic processing for {len(req.run_ids)} run(s).", "run_ids": req.run_ids}
+
 
 @router.delete("/runs/{run_id}")
 async def delete_run_data(run_id: str):

@@ -15,6 +15,15 @@ async def item_master_agent(state: AgentState) -> AgentState:
     
     erp_client = ERPNextClient()
     
+    # Map of sku -> product title for fuzzy matching
+    sku_titles = {}
+    for order in state.get("raw_orders", []):
+        for line in order.get("line_items", []):
+            s = line.get("sku") or line.get("name")
+            t = line.get("title") or line.get("name") or ""
+            if s and s not in sku_titles:
+                sku_titles[s] = t
+
     async with AsyncSessionLocal() as db:
         for sku in classified_skus:
             # Check local map first
@@ -26,13 +35,14 @@ async def item_master_agent(state: AgentState) -> AgentState:
                 continue
                 
             try:
-                # Check ERPNext
-                item = await erp_client.get_item(sku)
+                # Check ERPNext with intelligent SKU + Title resolution
+                title = sku_titles.get(sku, "")
+                item = await erp_client.get_item(sku, title=title)
                 if not item:
                     # Create in ERPNext
                     payload = {
                         "item_code": sku,
-                        "item_name": sku,
+                        "item_name": title or sku,
                         "item_group": "Products",
                         "is_stock_item": 1,
                         "is_sales_item": 1,

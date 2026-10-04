@@ -15,6 +15,8 @@ class AgentState(TypedDict):
     staged_order_ids: List[int]
     # SKUs that were classified successfully
     classified_skus: List[str]
+    # Mapped ERPNext Material codes
+    erp_material_codes: Optional[List[str]]
     # SKUs that failed or need exceptions
     exceptions: List[Dict[str, Any]]
     # Work order plans generated in this run

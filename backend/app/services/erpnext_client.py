@@ -15,42 +15,83 @@ class ERPNextClient:
         }
         self.client = httpx.AsyncClient(base_url=self.base_url, headers=self.headers, timeout=30.0)
 
-    async def get_item(self, item_code: str) -> Optional[Dict[str, Any]]:
+    async def get_item(self, item_code: str, title: str = "") -> Optional[Dict[str, Any]]:
+        import re
+        clean_code = str(item_code or "").strip()
+        if not clean_code:
+            return None
+
         # 1. Try exact match on item_code (primary key)
-        response = await self.client.get(f"/api/resource/Item/{item_code}")
+        response = await self.client.get(f"/api/resource/Item/{clean_code}")
         if response.status_code == 200:
             return response.json().get("data")
             
-        # 2. If 404, fallback to searching by item_name (exact then like)
-        if response.status_code == 404:
-            # 2a. Exact item_name
-            params = {
-                "filters": f'[["item_name", "=", "{item_code}"]]',
-                "fields": '["name", "item_code", "item_name"]'
-            }
-            search_resp = await self.client.get("/api/resource/Item", params=params)
-            if search_resp.status_code == 200:
-                data = search_resp.json().get("data", [])
-                if data:
-                    return data[0]
+        # 2. Search by exact item_name
+        params = {
+            "filters": f'[["item_name", "=", "{clean_code}"]]',
+            "fields": '["name", "item_code", "item_name"]'
+        }
+        search_resp = await self.client.get("/api/resource/Item", params=params)
+        if search_resp.status_code == 200:
+            data = search_resp.json().get("data", [])
+            if data:
+                return data[0]
 
-            # 2b. Like matches (handling _ and -)
-            variations = [item_code, item_code.replace("_", "-"), item_code.replace("_", " "), item_code.replace("-", " ")]
-            for v in variations:
-                clean_v = v.strip()
-                if clean_v:
-                    params_like = {
-                        "filters": f'[["item_name", "like", "%{clean_v}%"]]',
-                        "fields": '["name", "item_code", "item_name"]'
-                    }
-                    resp_like = await self.client.get("/api/resource/Item", params=params_like)
-                    if resp_like.status_code == 200:
-                        data_like = resp_like.json().get("data", [])
-                        if data_like:
-                            return data_like[0]
-            return None
+        # 3. Fetch all ERP items to perform fuzzy + size matching (strictly prioritizing variants over template items)
+        all_items_resp = await self.client.get('/api/resource/Item?fields=["name","item_code","item_name","has_variants","variant_of"]&limit_page_length=500')
+        if all_items_resp.status_code == 200:
+            all_items = all_items_resp.json().get("data", [])
             
-        response.raise_for_status()
+            # Normalize single/double quotes in search text
+            combined_text = f"{clean_code} {title}".replace('’', "'").replace('‘', "'")
+            
+            # Detect size (e.g. XXS, XS, S, M, L, XL, XXL)
+            size_match = re.search(r'[-_ ](XXS|XS|S|M|L|XL|XXL)\b', combined_text, re.IGNORECASE)
+            detected_size = size_match.group(1).upper() if size_match else None
+            
+            # Extract meaningful keywords
+            raw_words = re.findall(r'[A-Za-z0-9]{3,}', combined_text)
+            stopwords = {'the', 'nara', 'cotton', 'women', 'style', 'wear', 'flowy', 'pure', 'for', 'with', 'and', 'set', 'shape', 'skirt', 'shirt', 'top', 'pants', 'item'}
+            keywords = [w.lower() for w in raw_words if w.lower() not in stopwords]
+            
+            scored = []
+            for it in all_items:
+                is_template = bool(it.get("has_variants"))
+                # Strictly skip template master items from being returned
+                if is_template:
+                    continue
+
+                iname = (it.get("item_name") or "").replace('’', "'").replace('‘', "'").lower()
+                icode = (it.get("name") or "").lower()
+                
+                matched_kw_count = 0
+                for kw in keywords:
+                    if kw in iname or kw in icode:
+                        matched_kw_count += 1
+                        
+                # Must match at least 1 significant product keyword
+                if matched_kw_count == 0:
+                    continue
+
+                score = matched_kw_count * 5
+                        
+                if detected_size:
+                    size_tag = detected_size.lower()
+                    if f"-{size_tag}" in iname or f" {size_tag}" in iname or f"_{size_tag}" in iname or f"-{size_tag}" in icode:
+                        score += 10
+                    else:
+                        score -= 5
+                    
+                if score >= 10:
+                    if it.get("variant_of"):
+                        score += 3
+                    scored.append((score, it))
+                    
+            if scored:
+                scored.sort(key=lambda x: x[0], reverse=True)
+                return scored[0][1]
+                
+        return None
 
     async def create_item(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         response = await self.client.post("/api/resource/Item", json=payload)

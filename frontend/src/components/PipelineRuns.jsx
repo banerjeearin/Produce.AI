@@ -1,20 +1,39 @@
 import React, { useState, useEffect } from 'react';
-import { getActivities, deleteRunData, getRunState, resumeRun, getErpItems, updateSkuMapping } from '../services/api';
+import { 
+    getActivities, deleteRunData, getRunState, resumeRun, 
+    autoRunPipeline, massAutoRunPipelines, getErpItems, updateSkuMapping,
+    fetchBomSummary 
+} from '../services/api';
 
-const PipelineRuns = () => {
+const PipelineRuns = ({ dateFrom, dateTo }) => {
     const [activities, setActivities] = useState([]);
     const [runStates, setRunStates] = useState({});
     const [isLoading, setIsLoading] = useState(true);
     const [expandedRuns, setExpandedRuns] = useState({});
     const [isDeleting, setIsDeleting] = useState(false);
     const [isResuming, setIsResuming] = useState(false);
+    const [selectedRunIds, setSelectedRunIds] = useState([]);
+    const [isMassRunning, setIsMassRunning] = useState(false);
+    const [autoRunningRunId, setAutoRunningRunId] = useState(null);
     const [erpItemsList, setErpItemsList] = useState([]);
     const [editingMapping, setEditingMapping] = useState(null); // { runId, sku, erpCode, isSaving: false }
+    const [copiedDocId, setCopiedDocId] = useState(null);
+    const [bomSummaryData, setBomSummaryData] = useState(null);
+    const [isBomSummaryOpen, setIsBomSummaryOpen] = useState(true);
+
+    const loadBomSummary = async () => {
+        try {
+            const data = await fetchBomSummary(dateFrom, dateTo);
+            setBomSummaryData(data);
+        } catch (err) {
+            console.error("Failed to load BOM summary:", err);
+        }
+    };
 
     const fetchAllActivities = async () => {
         try {
-            // Fetch up to 200 activities to ensure we get full runs
-            const data = await getActivities(200);
+            // Fetch activities filtered by selected date range
+            const data = await getActivities(300, dateFrom, dateTo);
             setActivities(data);
             
             // Fetch HITL states for all unique runs in parallel for instant loading
@@ -41,6 +60,7 @@ const PipelineRuns = () => {
 
     useEffect(() => {
         fetchAllActivities();
+        loadBomSummary();
         // Load available ERPNext items list once
         getErpItems().then(res => {
             if (res && res.items) {
@@ -48,9 +68,12 @@ const PipelineRuns = () => {
             }
         }).catch(err => console.error("Failed to load ERP items:", err));
 
-        const interval = setInterval(fetchAllActivities, 15000);
+        const interval = setInterval(() => {
+            fetchAllActivities();
+            loadBomSummary();
+        }, 10000);
         return () => clearInterval(interval);
-    }, []);
+    }, [dateFrom, dateTo]);
 
     const handleDeleteRun = async (e, runId) => {
         e.stopPropagation();
@@ -70,17 +93,85 @@ const PipelineRuns = () => {
         }
     };
 
+    // Manual single-step resume (as-is manual process)
     const handleResumeRun = async (runId) => {
         setIsResuming(true);
         try {
             await resumeRun(runId);
-            alert(`Run ${runId} resumed successfully.`);
             await fetchAllActivities(); // Refresh UI immediately
         } catch (err) {
             console.error(err);
             alert(`Failed to resume run: ${err.message}`);
         } finally {
             setIsResuming(false);
+        }
+    };
+
+    // Auto-execute all stages for a SINGLE run
+    const handleAutoRunSingle = async (runId) => {
+        setAutoRunningRunId(runId);
+        try {
+            await autoRunPipeline(runId);
+            await fetchAllActivities();
+        } catch (err) {
+            console.error(err);
+            alert(`Auto-run error for ${runId}: ${err.message}`);
+        } finally {
+            setAutoRunningRunId(null);
+        }
+    };
+
+    // Toggle single run selection checkbox
+    const handleToggleSelectRun = (e, runId) => {
+        e.stopPropagation();
+        setSelectedRunIds(prev => 
+            prev.includes(runId) ? prev.filter(id => id !== runId) : [...prev, runId]
+        );
+    };
+
+    // Select all / Deselect all pending runs
+    const handleSelectAllPending = (e) => {
+        const pausedRunIds = Object.keys(groupedRuns).filter(rId => runStates[rId]?.status === 'PAUSED');
+        if (selectedRunIds.length === pausedRunIds.length && pausedRunIds.length > 0) {
+            setSelectedRunIds([]);
+        } else {
+            setSelectedRunIds(pausedRunIds);
+        }
+    };
+
+    // Mass execute either SELECTED runs or all pending runs
+    const handleMassAutoRun = async () => {
+        const pausedRunIds = Object.keys(groupedRuns).filter(rId => {
+            const st = runStates[rId];
+            return st && st.status === 'PAUSED';
+        });
+
+        // If user has specific checkboxes checked, run those; otherwise fallback to all pending
+        const targetRunIds = selectedRunIds.length > 0 
+            ? selectedRunIds.filter(id => runStates[id]?.status === 'PAUSED')
+            : pausedRunIds;
+
+        if (targetRunIds.length === 0) {
+            alert('No pending/paused runs selected for mass processing.');
+            return;
+        }
+
+        if (!window.confirm(`Are you sure you want to mass-process all stages for ${targetRunIds.length} selected run(s)?`)) {
+            return;
+        }
+
+        setIsMassRunning(true);
+        try {
+            const res = await massAutoRunPipelines(targetRunIds);
+            alert(res.message || `Started mass processing for ${targetRunIds.length} runs.`);
+            setSelectedRunIds([]); // Reset selection
+            setTimeout(fetchAllActivities, 2000);
+            setTimeout(fetchAllActivities, 5000);
+        } catch (err) {
+            console.error(err);
+            alert(`Failed mass processing: ${err.message}`);
+        } finally {
+            setIsMassRunning(false);
         }
     };
 
@@ -135,6 +226,10 @@ const PipelineRuns = () => {
         return acc;
     }, {});
 
+    const pendingRuns = Object.keys(groupedRuns).filter(rId => runStates[rId]?.status === 'PAUSED');
+    const pendingRunsCount = pendingRuns.length;
+    const isAllSelected = pendingRunsCount > 0 && selectedRunIds.length === pendingRunsCount;
+
     if (isLoading) {
         return (
             <div className="card glass-panel" style={{ padding: '2rem', textAlign: 'center', marginTop: '2rem' }}>
@@ -154,15 +249,282 @@ const PipelineRuns = () => {
                 ))}
             </datalist>
 
-            <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <h2><i className="ri-git-merge-line text-primary"></i> Agent-wise Pipeline Runs</h2>
-                <span className="badge">{Object.keys(groupedRuns).length} Runs</span>
+            <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
+                <div>
+                    <h2><i className="ri-git-merge-line text-primary"></i> Agent-wise Pipeline Runs</h2>
+                    <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '0.25rem 0 0 0' }}>
+                        Showing runs for selected date range • {pendingRunsCount} Pending Human Approval
+                    </p>
+                </div>
+                
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+                    {/* Select All Checkbox */}
+                    {pendingRunsCount > 0 && (
+                        <label 
+                            style={{ 
+                                display: 'inline-flex', 
+                                alignItems: 'center', 
+                                gap: '0.4rem', 
+                                cursor: 'pointer', 
+                                fontSize: '0.85rem', 
+                                color: 'var(--text-main)',
+                                background: 'rgba(255,255,255,0.06)',
+                                padding: '0.45rem 0.75rem',
+                                borderRadius: '6px',
+                                border: '1px solid var(--border-glass)'
+                            }}
+                        >
+                            <input 
+                                type="checkbox" 
+                                checked={isAllSelected} 
+                                onChange={handleSelectAllPending}
+                                style={{ accentColor: 'var(--primary)', cursor: 'pointer', width: '15px', height: '15px' }}
+                            />
+                            <span>Select All ({selectedRunIds.length}/{pendingRunsCount})</span>
+                        </label>
+                    )}
+
+                    <span className="badge" style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem' }}>
+                        {Object.keys(groupedRuns).length} Total Runs
+                    </span>
+
+                    {/* Mass Auto-Process Button */}
+                    <button
+                        onClick={handleMassAutoRun}
+                        disabled={isMassRunning || (selectedRunIds.length === 0 && pendingRunsCount === 0)}
+                        style={{
+                            background: (selectedRunIds.length > 0 || pendingRunsCount > 0)
+                                ? 'linear-gradient(135deg, #10b981 0%, #059669 100%)' 
+                                : 'rgba(255,255,255,0.05)',
+                            color: (selectedRunIds.length > 0 || pendingRunsCount > 0) ? '#ffffff' : 'var(--text-muted)',
+                            border: 'none',
+                            padding: '0.55rem 1.25rem',
+                            borderRadius: '8px',
+                            cursor: (selectedRunIds.length > 0 || pendingRunsCount > 0) ? 'pointer' : 'not-allowed',
+                            fontWeight: '600',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '0.5rem',
+                            fontSize: '0.85rem',
+                            boxShadow: (selectedRunIds.length > 0 || pendingRunsCount > 0) ? '0 4px 12px rgba(16, 185, 129, 0.35)' : 'none',
+                            transition: 'all 0.2s ease'
+                        }}
+                        title="Mass-execute all remaining stages for selected or all active runs"
+                    >
+                        <i className={isMassRunning ? "ri-loader-4-line spin" : "ri-flashlight-fill"}></i>
+                        {isMassRunning 
+                            ? 'Mass Processing...' 
+                            : selectedRunIds.length > 0 
+                                ? `Mass Process Selected (${selectedRunIds.length})` 
+                                : `Mass Process All Stages (${pendingRunsCount})`
+                        }
+                    </button>
+                </div>
             </div>
+            
+            {/* BOM Summary for Selected Period Panel */}
+            {bomSummaryData && bomSummaryData.summary && bomSummaryData.summary.length > 0 && (
+                <div style={{ margin: '1.25rem 1.5rem 0 1.5rem', background: 'rgba(15, 23, 42, 0.75)', border: '1px solid rgba(99, 102, 241, 0.3)', borderRadius: '10px', overflow: 'hidden' }}>
+                    <div 
+                        onClick={() => setIsBomSummaryOpen(!isBomSummaryOpen)}
+                        style={{ 
+                            padding: '0.85rem 1.25rem', 
+                            background: 'rgba(99, 102, 241, 0.12)', 
+                            display: 'flex', 
+                            justifyContent: 'space-between', 
+                            alignItems: 'center', 
+                            cursor: 'pointer',
+                            borderBottom: isBomSummaryOpen ? '1px solid rgba(99, 102, 241, 0.2)' : 'none'
+                        }}
+                    >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+                            <span style={{ fontWeight: '600', color: '#c7d2fe', fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                <i className="ri-file-list-3-line" style={{ color: '#818cf8', fontSize: '1.1rem' }}></i> 
+                                Period BOM Requirements Summary ({bomSummaryData.total_items} Finished Goods)
+                            </span>
+                            <span className="badge success" style={{ fontSize: '0.75rem', padding: '0.2rem 0.5rem' }}>
+                                {bomSummaryData.active_boms} Active BOMs
+                            </span>
+                            {bomSummaryData.missing_boms > 0 ? (
+                                <span className="badge warning" style={{ fontSize: '0.75rem', padding: '0.2rem 0.5rem' }}>
+                                    {bomSummaryData.missing_boms} BOMs To Create
+                                </span>
+                            ) : (
+                                <span className="badge success" style={{ fontSize: '0.75rem', padding: '0.2rem 0.5rem' }}>
+                                    All BOMs Ready
+                                </span>
+                            )}
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                            <span>{isBomSummaryOpen ? 'Hide Summary' : 'View Details'}</span>
+                            <i className={`ri-arrow-${isBomSummaryOpen ? 'up' : 'down'}-s-line`} style={{ fontSize: '1.2rem' }}></i>
+                        </div>
+                    </div>
+
+                    {isBomSummaryOpen && (
+                        <div style={{ padding: '1rem', overflowX: 'auto' }}>
+                            <table className="data-table" style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.82rem' }}>
+                                <thead>
+                                    <tr style={{ background: 'rgba(255,255,255,0.03)' }}>
+                                        <th style={{ textAlign: 'left', padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border-color)' }}>Shopify SKU</th>
+                                        <th style={{ textAlign: 'left', padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border-color)' }}>ERP Material Code</th>
+                                        <th style={{ textAlign: 'left', padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border-color)' }}>Finished Good Item Name</th>
+                                        <th style={{ textAlign: 'center', padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border-color)' }}>Total Demand (Qty)</th>
+                                        <th style={{ textAlign: 'center', padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border-color)' }}>Orders Count</th>
+                                        <th style={{ textAlign: 'left', padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border-color)' }}>ERPNext BOM ID</th>
+                                        <th style={{ textAlign: 'center', padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border-color)' }}>BOM Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {bomSummaryData.summary.map((item, sIdx) => {
+                                        const isSkuCopied = copiedDocId === `bom-sku-${item.shopify_sku}`;
+                                        const isMatCopied = copiedDocId === `bom-mat-${item.erp_material_code}`;
+                                        return (
+                                            <tr key={sIdx} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                                                {/* Shopify SKU */}
+                                                <td style={{ padding: '0.5rem 0.75rem', fontFamily: 'monospace', color: '#93c5fd', fontWeight: '500' }}>
+                                                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
+                                                        <span>{item.shopify_sku}</span>
+                                                        <button
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                navigator.clipboard.writeText(item.shopify_sku);
+                                                                setCopiedDocId(`bom-sku-${item.shopify_sku}`);
+                                                                setTimeout(() => setCopiedDocId(null), 2000);
+                                                            }}
+                                                            style={{
+                                                                background: isSkuCopied ? 'rgba(16, 185, 129, 0.2)' : 'rgba(255, 255, 255, 0.06)',
+                                                                border: isSkuCopied ? '1px solid #10b981' : '1px solid var(--border-glass)',
+                                                                color: isSkuCopied ? '#10b981' : 'var(--text-muted)',
+                                                                borderRadius: '4px',
+                                                                padding: '0.1rem 0.35rem',
+                                                                cursor: 'pointer',
+                                                                display: 'inline-flex',
+                                                                alignItems: 'center',
+                                                                fontSize: '0.75rem'
+                                                            }}
+                                                            title={isSkuCopied ? "Copied!" : "Copy Shopify SKU"}
+                                                        >
+                                                            <i className={isSkuCopied ? "ri-check-line" : "ri-file-copy-line"}></i>
+                                                        </button>
+                                                    </div>
+                                                </td>
+
+                                                {/* ERP Material Code */}
+                                                <td style={{ padding: '0.5rem 0.75rem', fontFamily: 'monospace' }}>
+                                                    {item.erp_material_code ? (
+                                                        <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
+                                                            <span style={{ color: '#38bdf8', fontWeight: '700', background: 'rgba(56, 189, 248, 0.1)', padding: '0.15rem 0.4rem', borderRadius: '4px', border: '1px solid rgba(56, 189, 248, 0.25)' }}>
+                                                                {item.erp_material_code}
+                                                            </span>
+                                                            <button
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    navigator.clipboard.writeText(item.erp_material_code);
+                                                                    setCopiedDocId(`bom-mat-${item.erp_material_code}`);
+                                                                    setTimeout(() => setCopiedDocId(null), 2000);
+                                                                }}
+                                                                style={{
+                                                                    background: isMatCopied ? 'rgba(16, 185, 129, 0.2)' : 'rgba(255, 255, 255, 0.06)',
+                                                                    border: isMatCopied ? '1px solid #10b981' : '1px solid var(--border-glass)',
+                                                                    color: isMatCopied ? '#10b981' : 'var(--text-muted)',
+                                                                    borderRadius: '4px',
+                                                                    padding: '0.1rem 0.35rem',
+                                                                    cursor: 'pointer',
+                                                                    display: 'inline-flex',
+                                                                    alignItems: 'center',
+                                                                    fontSize: '0.75rem'
+                                                                }}
+                                                                title={isMatCopied ? "Copied!" : "Copy Material Code"}
+                                                            >
+                                                                <i className={isMatCopied ? "ri-check-line" : "ri-file-copy-line"}></i>
+                                                            </button>
+                                                        </div>
+                                                    ) : (
+                                                        <span style={{ color: '#f59e0b', fontSize: '0.75rem', fontStyle: 'italic', background: 'rgba(245, 158, 11, 0.1)', padding: '0.15rem 0.4rem', borderRadius: '4px', border: '1px solid rgba(245, 158, 11, 0.25)' }}>
+                                                            <i className="ri-alert-line"></i> Unmapped in ERP
+                                                        </span>
+                                                    )}
+                                                </td>
+
+                                                <td style={{ padding: '0.5rem 0.75rem', color: 'var(--text-main)', maxWidth: '280px' }}>{item.item_name}</td>
+                                                <td style={{ padding: '0.5rem 0.75rem', textAlign: 'center', fontWeight: 'bold', color: '#f8fafc' }}>
+                                                    {item.total_ordered_qty} Nos
+                                                </td>
+                                                <td style={{ padding: '0.5rem 0.75rem', textAlign: 'center', color: 'var(--text-muted)' }}>
+                                                    {item.orders_count}
+                                                </td>
+                                                <td style={{ padding: '0.5rem 0.75rem' }}>
+                                                    {item.existing_bom ? (
+                                                        <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
+                                                            <span style={{ 
+                                                                fontFamily: 'monospace', 
+                                                                color: '#34d399', 
+                                                                background: 'rgba(16, 185, 129, 0.1)', 
+                                                                border: '1px solid rgba(16, 185, 129, 0.3)', 
+                                                                padding: '0.15rem 0.4rem', 
+                                                                borderRadius: '4px', 
+                                                                fontSize: '0.75rem',
+                                                                fontWeight: '600'
+                                                            }}>
+                                                                {item.existing_bom}
+                                                            </span>
+                                                            <button
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    navigator.clipboard.writeText(item.existing_bom);
+                                                                    setCopiedDocId(`bom-doc-${item.existing_bom}`);
+                                                                    setTimeout(() => setCopiedDocId(null), 2000);
+                                                                }}
+                                                                style={{
+                                                                    background: copiedDocId === `bom-doc-${item.existing_bom}` ? 'rgba(16, 185, 129, 0.2)' : 'rgba(255, 255, 255, 0.06)',
+                                                                    border: copiedDocId === `bom-doc-${item.existing_bom}` ? '1px solid #10b981' : '1px solid var(--border-glass)',
+                                                                    color: copiedDocId === `bom-doc-${item.existing_bom}` ? '#10b981' : 'var(--text-muted)',
+                                                                    borderRadius: '4px',
+                                                                    padding: '0.1rem 0.35rem',
+                                                                    cursor: 'pointer',
+                                                                    display: 'inline-flex',
+                                                                    alignItems: 'center',
+                                                                    fontSize: '0.75rem'
+                                                                }}
+                                                                title={copiedDocId === `bom-doc-${item.existing_bom}` ? "Copied!" : "Copy BOM ID"}
+                                                            >
+                                                                <i className={copiedDocId === `bom-doc-${item.existing_bom}` ? "ri-check-line" : "ri-file-copy-line"}></i>
+                                                            </button>
+                                                        </div>
+                                                    ) : (
+                                                        <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>—</span>
+                                                    )}
+                                                </td>
+                                                <td style={{ padding: '0.5rem 0.75rem', textAlign: 'center' }}>
+                                                    {item.bom_status === 'ACTIVE' ? (
+                                                        <span className="badge success" style={{ fontSize: '0.75rem' }}>
+                                                            <i className="ri-checkbox-circle-fill"></i> Active in ERP
+                                                        </span>
+                                                    ) : item.bom_status === 'RECIPE_READY' ? (
+                                                        <span className="badge warning" style={{ fontSize: '0.75rem' }}>
+                                                            <i className="ri-tools-fill"></i> Recipe Ready
+                                                        </span>
+                                                    ) : (
+                                                        <span className="badge danger" style={{ fontSize: '0.75rem' }}>
+                                                            <i className="ri-alert-fill"></i> Needs Recipe
+                                                        </span>
+                                                    )}
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
+                </div>
+            )}
             
             <div style={{ padding: '1.5rem' }}>
                 {Object.keys(groupedRuns).length === 0 ? (
                     <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
-                        No pipeline activity recorded yet. Run a pipeline from the dashboard!
+                        No pipeline activity recorded in this date range. Run a pipeline from the dashboard!
                     </div>
                 ) : (
                     Object.entries(groupedRuns).map(([runId, runActivities], idx) => {
@@ -170,13 +532,14 @@ const PipelineRuns = () => {
                         const latestTime = runActivities.length > 0 ? formatDate(runActivities[0].created_at) : '';
                         const runState = runStates[runId];
                         const isPaused = runState?.status === 'PAUSED';
+                        const isSelected = selectedRunIds.includes(runId);
                         
                         return (
-                            <div key={runId} style={{ marginBottom: '1rem', border: '1px solid var(--border-color)', borderRadius: '8px', overflow: 'hidden' }}>
+                            <div key={runId} style={{ marginBottom: '1rem', border: isSelected ? '1px solid #10b981' : '1px solid var(--border-color)', borderRadius: '8px', overflow: 'hidden', transition: 'border 0.2s ease' }}>
                                 <div 
                                     style={{ 
                                         padding: '1rem', 
-                                        backgroundColor: isPaused ? 'rgba(255, 193, 7, 0.1)' : 'var(--panel-bg)', 
+                                        backgroundColor: isSelected ? 'rgba(16, 185, 129, 0.08)' : isPaused ? 'rgba(255, 193, 7, 0.1)' : 'var(--panel-bg)', 
                                         cursor: 'pointer',
                                         display: 'flex',
                                         justifyContent: 'space-between',
@@ -184,21 +547,43 @@ const PipelineRuns = () => {
                                     }}
                                     onClick={() => toggleRun(runId)}
                                 >
-                                    <div>
-                                        <h3 style={{ margin: 0, fontSize: '1.1rem' }}>
-                                            Run: {runId} 
-                                            {runState?.values?.raw_orders?.length === 1 && (
-                                                <span style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginLeft: '0.5rem' }}>
-                                                    (Order {runState.values.raw_orders[0].name || runState.values.raw_orders[0].id})
-                                                </span>
-                                            )}
-                                        </h3>
-                                        <small style={{ color: 'var(--text-muted)' }}>Started at: {latestTime}</small>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem' }}>
+                                        {/* Individual Checkbox for Mass Action */}
                                         {isPaused && (
-                                            <div style={{ marginTop: '0.5rem' }}>
-                                                <span className="badge warning">PENDING APPROVAL</span>
-                                            </div>
+                                            <input 
+                                                type="checkbox"
+                                                checked={isSelected}
+                                                onChange={(e) => handleToggleSelectRun(e, runId)}
+                                                onClick={(e) => e.stopPropagation()}
+                                                style={{ 
+                                                    accentColor: '#10b981', 
+                                                    width: '18px', 
+                                                    height: '18px', 
+                                                    cursor: 'pointer' 
+                                                }}
+                                                title="Select for mass processing"
+                                            />
                                         )}
+                                        <div>
+                                            <h3 style={{ margin: 0, fontSize: '1.1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                                Run: {runId} 
+                                                {runState?.values?.raw_orders?.length === 1 && (
+                                                    <span style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>
+                                                        (Order {runState.values.raw_orders[0].name || runState.values.raw_orders[0].id})
+                                                    </span>
+                                                )}
+                                            </h3>
+                                            <small style={{ color: 'var(--text-muted)' }}>Started at: {latestTime}</small>
+                                            {isPaused ? (
+                                                <div style={{ marginTop: '0.4rem' }}>
+                                                    <span className="badge warning">PENDING APPROVAL</span>
+                                                </div>
+                                            ) : (
+                                                <div style={{ marginTop: '0.4rem' }}>
+                                                    <span className="badge success">COMPLETED</span>
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
                                         <button 
@@ -515,16 +900,17 @@ const PipelineRuns = () => {
                                                     </div>
                                                 )}
 
-                                                {/* Step Approval Action */}
-                                                <div style={{ marginTop: '1.5rem', display: 'flex', gap: '1rem', alignItems: 'center' }}>
+                                                {/* Step-by-Step Approval AND Full Auto-Run Actions */}
+                                                <div style={{ marginTop: '1.5rem', display: 'flex', gap: '1rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                                                    {/* 1. Step-by-Step Manual Approval (As-is) */}
                                                     <button
                                                         onClick={() => handleResumeRun(runId)}
-                                                        disabled={isResuming}
+                                                        disabled={isResuming || autoRunningRunId === runId}
                                                         style={{ 
                                                             background: 'linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%)', 
                                                             color: 'white', 
                                                             border: 'none', 
-                                                            padding: '0.75rem 1.75rem', 
+                                                            padding: '0.75rem 1.5rem', 
                                                             borderRadius: '8px', 
                                                             cursor: 'pointer', 
                                                             fontWeight: 'bold', 
@@ -534,8 +920,31 @@ const PipelineRuns = () => {
                                                             boxShadow: '0 4px 14px rgba(79, 70, 229, 0.4)'
                                                         }}
                                                     >
-                                                        <i className="ri-checkbox-circle-line" style={{ fontSize: '1.1rem' }}></i> 
-                                                        Approve & Run Next Agent: {runState.next_nodes.join(', ').toUpperCase()}
+                                                        <i className={isResuming ? "ri-loader-4-line spin" : "ri-checkbox-circle-line"} style={{ fontSize: '1.1rem' }}></i> 
+                                                        {isResuming ? 'Running Step...' : `Approve & Run Next Agent: ${runState.next_nodes.join(', ').toUpperCase()}`}
+                                                    </button>
+
+                                                    {/* 2. Auto-Process All Remaining Stages for this Single Run */}
+                                                    <button
+                                                        onClick={() => handleAutoRunSingle(runId)}
+                                                        disabled={isResuming || autoRunningRunId === runId}
+                                                        style={{ 
+                                                            background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)', 
+                                                            color: 'white', 
+                                                            border: 'none', 
+                                                            padding: '0.75rem 1.5rem', 
+                                                            borderRadius: '8px', 
+                                                            cursor: 'pointer', 
+                                                            fontWeight: 'bold', 
+                                                            display: 'flex', 
+                                                            alignItems: 'center', 
+                                                            gap: '0.5rem',
+                                                            boxShadow: '0 4px 14px rgba(16, 185, 129, 0.35)'
+                                                        }}
+                                                        title="Execute all stages until completion for this order without asking for further approvals"
+                                                    >
+                                                        <i className={autoRunningRunId === runId ? "ri-loader-4-line spin" : "ri-flashlight-line"} style={{ fontSize: '1.1rem' }}></i> 
+                                                        {autoRunningRunId === runId ? 'Auto-Running All Stages...' : 'Auto-Run All Remaining Stages'}
                                                     </button>
                                                 </div>
                                             </div>
@@ -564,19 +973,45 @@ const PipelineRuns = () => {
                                                         <td style={{ padding: '0.75rem', color: 'var(--text-muted)' }}>{act.description}</td>
                                                         <td style={{ padding: '0.75rem' }}>
                                                             {act.doc_reference ? (
-                                                                <span style={{ 
-                                                                    fontFamily: 'monospace', 
-                                                                    color: '#38bdf8', 
-                                                                    background: 'rgba(56, 189, 248, 0.1)', 
-                                                                    border: '1px solid rgba(56, 189, 248, 0.3)', 
-                                                                    padding: '0.2rem 0.5rem', 
-                                                                    borderRadius: '4px',
-                                                                    fontSize: '0.8rem',
-                                                                    fontWeight: '600',
-                                                                    display: 'inline-block'
-                                                                }}>
-                                                                    {act.doc_reference}
-                                                                </span>
+                                                                <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
+                                                                    <span style={{ 
+                                                                        fontFamily: 'monospace', 
+                                                                        color: '#38bdf8', 
+                                                                        background: 'rgba(56, 189, 248, 0.1)', 
+                                                                        border: '1px solid rgba(56, 189, 248, 0.3)', 
+                                                                        padding: '0.2rem 0.5rem', 
+                                                                        borderRadius: '4px',
+                                                                        fontSize: '0.8rem',
+                                                                        fontWeight: '600',
+                                                                        display: 'inline-block'
+                                                                    }}>
+                                                                        {act.doc_reference}
+                                                                    </span>
+                                                                    <button
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            navigator.clipboard.writeText(act.doc_reference);
+                                                                            const key = `${act.id || idx2}-${act.doc_reference}`;
+                                                                            setCopiedDocId(key);
+                                                                            setTimeout(() => setCopiedDocId(null), 2000);
+                                                                        }}
+                                                                        style={{
+                                                                            background: copiedDocId === `${act.id || idx2}-${act.doc_reference}` ? 'rgba(16, 185, 129, 0.2)' : 'rgba(255, 255, 255, 0.06)',
+                                                                            border: copiedDocId === `${act.id || idx2}-${act.doc_reference}` ? '1px solid #10b981' : '1px solid var(--border-glass)',
+                                                                            color: copiedDocId === `${act.id || idx2}-${act.doc_reference}` ? '#10b981' : 'var(--text-muted)',
+                                                                            borderRadius: '4px',
+                                                                            padding: '0.2rem 0.4rem',
+                                                                            cursor: 'pointer',
+                                                                            display: 'inline-flex',
+                                                                            alignItems: 'center',
+                                                                            fontSize: '0.8rem',
+                                                                            transition: 'all 0.15s ease'
+                                                                        }}
+                                                                        title={copiedDocId === `${act.id || idx2}-${act.doc_reference}` ? "Copied!" : "Copy Reference"}
+                                                                    >
+                                                                        <i className={copiedDocId === `${act.id || idx2}-${act.doc_reference}` ? "ri-check-line" : "ri-file-copy-line"}></i>
+                                                                    </button>
+                                                                </div>
                                                             ) : (
                                                                 <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>—</span>
                                                             )}

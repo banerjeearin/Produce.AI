@@ -1,12 +1,24 @@
-import React, { useState } from 'react';
+import React, { useState, forwardRef } from 'react';
 import { runPipeline } from '../services/api';
 import DatePicker from 'react-datepicker';
 import 'react-datepicker/dist/react-datepicker.css';
 
-const TopHeader = () => {
+// Custom input with forwardRef so react-datepicker can bind click and focus events properly
+const DateInputCustom = forwardRef(({ value, onClick, placeholder }, ref) => (
+    <button
+        type="button"
+        className="date-input-btn"
+        onClick={onClick}
+        ref={ref}
+    >
+        <i className="ri-calendar-line" style={{ color: 'var(--primary)', marginRight: '6px' }}></i>
+        <span>{value || placeholder || 'Select date'}</span>
+    </button>
+));
+DateInputCustom.displayName = 'DateInputCustom';
+
+const TopHeader = ({ dateFrom, setDateFrom, dateTo, setDateTo }) => {
     const [isLoading, setIsLoading] = useState(false);
-    const [dateFrom, setDateFrom] = useState(new Date(2025, 3, 1)); // 01.04.2025
-    const [dateTo, setDateTo] = useState(new Date(2025, 3, 10));  // 10.04.2025
 
     const handleRunPipeline = async () => {
         setIsLoading(true);
@@ -31,15 +43,6 @@ const TopHeader = () => {
         }
     };
 
-    const inputStyles = {
-        padding: '0.5rem', 
-        borderRadius: '4px', 
-        border: '1px solid var(--border-color)', 
-        background: 'var(--glass-bg)', 
-        color: 'var(--text-color)',
-        width: '110px'
-    };
-
     return (
         <header className="top-header">
             <div className="header-content">
@@ -47,21 +50,30 @@ const TopHeader = () => {
                 <p className="subtitle">Real-time Shopify to ERPNext Orchestration</p>
             </div>
             <div className="header-actions" style={{display: 'flex', gap: '1rem', alignItems: 'center'}}>
-                <div style={{display: 'flex', alignItems: 'center', gap: '0.5rem'}}>
+                <div className="date-range-container">
                     <DatePicker 
                         selected={dateFrom} 
                         onChange={(date) => setDateFrom(date)} 
+                        selectsStart
+                        startDate={dateFrom}
+                        endDate={dateTo}
                         dateFormat="dd.MM.yyyy"
                         placeholderText="DD.MM.YYYY"
-                        customInput={<input style={inputStyles} />}
+                        customInput={<DateInputCustom />}
+                        popperPlacement="bottom-start"
                     />
-                    <span style={{color: 'var(--text-muted)'}}>to</span>
+                    <span className="date-separator">to</span>
                     <DatePicker 
                         selected={dateTo} 
                         onChange={(date) => setDateTo(date)} 
+                        selectsEnd
+                        startDate={dateFrom}
+                        endDate={dateTo}
+                        minDate={dateFrom}
                         dateFormat="dd.MM.yyyy"
                         placeholderText="DD.MM.YYYY"
-                        customInput={<input style={inputStyles} />}
+                        customInput={<DateInputCustom />}
+                        popperPlacement="bottom-start"
                     />
                 </div>
                 <button 

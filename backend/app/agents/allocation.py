@@ -32,7 +32,7 @@ async def allocation_agent(state: AgentState) -> AgentState:
             if isinstance(r, dict) and r.get("item_code"):
                 code = str(r.get("item_code")).strip()
                 qty = float(r.get("bal_qty", 0.0))
-                stock_dict[code] = qty
+                stock_dict[code] = stock_dict.get(code, 0.0) + qty
                     
         # Check mapping from MapShopifySkuErpItem
         from app.models import MapShopifySkuErpItem

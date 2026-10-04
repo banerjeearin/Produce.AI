@@ -1,13 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { getActivities } from '../services/api';
 
-const ActivityFeed = () => {
+const ActivityFeed = ({ dateFrom, dateTo }) => {
     const [activities, setActivities] = useState([]);
+    const [copiedDocId, setCopiedDocId] = useState(null);
 
     useEffect(() => {
         const fetchActivities = async () => {
             try {
-                const data = await getActivities();
+                const data = await getActivities(100, dateFrom, dateTo);
                 setActivities(data);
             } catch (e) {
                 console.error(e);
@@ -17,7 +18,7 @@ const ActivityFeed = () => {
         fetchActivities();
         const interval = setInterval(fetchActivities, 5000);
         return () => clearInterval(interval);
-    }, []);
+    }, [dateFrom, dateTo]);
 
     const getIconClass = (type) => {
         if (type === 'SUCCESS') return 'success ri-check-line';
@@ -57,19 +58,44 @@ const ActivityFeed = () => {
                                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                                     <h4>{act.title}</h4>
                                     {act.doc_reference && (
-                                        <span style={{ 
-                                            fontFamily: 'monospace', 
-                                            color: '#38bdf8', 
-                                            background: 'rgba(56, 189, 248, 0.1)', 
-                                            border: '1px solid rgba(56, 189, 248, 0.3)', 
-                                            padding: '0.15rem 0.4rem', 
-                                            borderRadius: '4px',
-                                            fontSize: '0.75rem',
-                                            fontWeight: '600',
-                                            marginLeft: '0.5rem'
-                                        }}>
-                                            {act.doc_reference}
-                                        </span>
+                                        <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', marginLeft: '0.5rem' }}>
+                                            <span style={{ 
+                                                fontFamily: 'monospace', 
+                                                color: '#38bdf8', 
+                                                background: 'rgba(56, 189, 248, 0.1)', 
+                                                border: '1px solid rgba(56, 189, 248, 0.3)', 
+                                                padding: '0.15rem 0.4rem', 
+                                                borderRadius: '4px',
+                                                fontSize: '0.75rem',
+                                                fontWeight: '600'
+                                            }}>
+                                                {act.doc_reference}
+                                            </span>
+                                            <button
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    navigator.clipboard.writeText(act.doc_reference);
+                                                    const key = `${act.id || idx}-${act.doc_reference}`;
+                                                    setCopiedDocId(key);
+                                                    setTimeout(() => setCopiedDocId(null), 2000);
+                                                }}
+                                                style={{
+                                                    background: copiedDocId === `${act.id || idx}-${act.doc_reference}` ? 'rgba(16, 185, 129, 0.2)' : 'rgba(255, 255, 255, 0.06)',
+                                                    border: copiedDocId === `${act.id || idx}-${act.doc_reference}` ? '1px solid #10b981' : '1px solid var(--border-glass)',
+                                                    color: copiedDocId === `${act.id || idx}-${act.doc_reference}` ? '#10b981' : 'var(--text-muted)',
+                                                    borderRadius: '4px',
+                                                    padding: '0.15rem 0.35rem',
+                                                    cursor: 'pointer',
+                                                    display: 'inline-flex',
+                                                    alignItems: 'center',
+                                                    fontSize: '0.75rem',
+                                                    transition: 'all 0.15s ease'
+                                                }}
+                                                title={copiedDocId === `${act.id || idx}-${act.doc_reference}` ? "Copied!" : "Copy Reference"}
+                                            >
+                                                <i className={copiedDocId === `${act.id || idx}-${act.doc_reference}` ? "ri-check-line" : "ri-file-copy-line"}></i>
+                                            </button>
+                                        </div>
                                     )}
                                 </div>
                                 <p>{act.description}</p>

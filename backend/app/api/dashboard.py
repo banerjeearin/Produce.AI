@@ -2,16 +2,57 @@ from fastapi import APIRouter, HTTPException
 from sqlalchemy.future import select
 from sqlalchemy import func
 from app.db.session import AsyncSessionLocal
-from app.models import StgShopifySalesOrderHdr, StgWorkOrderPlan, ExceptionQueue
+from app.models import StgShopifySalesOrderHdr, StgWorkOrderPlan, ExceptionQueue, ActivityLog
+from typing import Optional
+from datetime import datetime
+import os
+import pytz
 
 router = APIRouter()
 
+def parse_date(date_str: Optional[str], end_of_day: bool = False) -> Optional[datetime]:
+    if not date_str:
+        return None
+    try:
+        tz = pytz.timezone(os.getenv("TIMEZONE", "Asia/Kolkata"))
+        dt = datetime.strptime(date_str, "%d.%m.%Y")
+        if end_of_day:
+            dt = dt.replace(hour=23, minute=59, second=59)
+        else:
+            dt = dt.replace(hour=0, minute=0, second=0)
+        return tz.localize(dt)
+    except Exception as e:
+        return None
+
 @router.get("/stats")
-async def get_stats():
+async def get_stats(date_from: Optional[str] = None, date_to: Optional[str] = None):
+    d_from = parse_date(date_from, end_of_day=False)
+    d_to = parse_date(date_to, end_of_day=True)
+
     async with AsyncSessionLocal() as db:
-        orders_count = await db.scalar(select(func.count(StgShopifySalesOrderHdr.id)))
-        wos_created = await db.scalar(select(func.count(StgWorkOrderPlan.id)).where(StgWorkOrderPlan.status == 'CREATED'))
-        open_exceptions = await db.scalar(select(func.count(ExceptionQueue.id)).where(ExceptionQueue.status == 'OPEN'))
+        # Orders processed count
+        stmt_orders = select(func.count(StgShopifySalesOrderHdr.id))
+        if d_from:
+            stmt_orders = stmt_orders.where(StgShopifySalesOrderHdr.created_at >= d_from)
+        if d_to:
+            stmt_orders = stmt_orders.where(StgShopifySalesOrderHdr.created_at <= d_to)
+        orders_count = await db.scalar(stmt_orders)
+
+        # Work orders created count
+        stmt_wos = select(func.count(StgWorkOrderPlan.id)).where(StgWorkOrderPlan.status == 'CREATED')
+        if d_from:
+            stmt_wos = stmt_wos.where(StgWorkOrderPlan.planning_date >= d_from)
+        if d_to:
+            stmt_wos = stmt_wos.where(StgWorkOrderPlan.planning_date <= d_to)
+        wos_created = await db.scalar(stmt_wos)
+
+        # Open exceptions count
+        stmt_ex = select(func.count(ExceptionQueue.id)).where(ExceptionQueue.status == 'OPEN')
+        if d_from:
+            stmt_ex = stmt_ex.where(ExceptionQueue.created_at >= d_from)
+        if d_to:
+            stmt_ex = stmt_ex.where(ExceptionQueue.created_at <= d_to)
+        open_exceptions = await db.scalar(stmt_ex)
         
     return {
         "orders_processed": orders_count or 0,
@@ -20,11 +61,32 @@ async def get_stats():
     }
 
 @router.get("/activities")
-async def get_activities(limit: int = 15):
+async def get_activities(limit: int = 100, date_from: Optional[str] = None, date_to: Optional[str] = None):
     from app.models import ActivityLog
+    d_from = parse_date(date_from, end_of_day=False)
+    d_to = parse_date(date_to, end_of_day=True)
+
     async with AsyncSessionLocal() as db:
         try:
-            result = await db.execute(select(ActivityLog).order_by(ActivityLog.created_at.desc()).limit(limit))
+            stmt = select(ActivityLog)
+            if d_from:
+                # Filter by runs that started on/after date or header date
+                # ActivityLog created_at can also be filtered or join on StgShopifySalesOrderHdr
+                stmt = stmt.join(StgShopifySalesOrderHdr, StgShopifySalesOrderHdr.run_id == ActivityLog.run_id, isouter=True)
+                stmt = stmt.where(
+                    (StgShopifySalesOrderHdr.created_at >= d_from) | 
+                    ((StgShopifySalesOrderHdr.id == None) & (ActivityLog.created_at >= d_from))
+                )
+            if d_to:
+                if not d_from:
+                    stmt = stmt.join(StgShopifySalesOrderHdr, StgShopifySalesOrderHdr.run_id == ActivityLog.run_id, isouter=True)
+                stmt = stmt.where(
+                    (StgShopifySalesOrderHdr.created_at <= d_to) |
+                    ((StgShopifySalesOrderHdr.id == None) & (ActivityLog.created_at <= d_to))
+                )
+
+            stmt = stmt.order_by(ActivityLog.created_at.desc()).limit(limit)
+            result = await db.execute(stmt)
             activities = result.scalars().all()
             return [{
                 "title": a.title, 
@@ -37,6 +99,7 @@ async def get_activities(limit: int = 15):
             } for a in activities]
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/exceptions")
 async def get_exceptions():
